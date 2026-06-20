@@ -92,6 +92,31 @@ export interface ConsumptionSummary {
   paid_amount: number
 }
 
+export interface ConsumptionMonthlySummary {
+  quota_used: number
+  paid_count: number
+  paid_amount: number
+  total_records: number
+}
+
+export interface ConsumptionRoomRanking {
+  room_id: number
+  room_no: string
+  room_name: string
+  quota_used: number
+  paid_count: number
+  paid_amount: number
+  total_days: number
+}
+
+export interface CalibrateResult {
+  month: string
+  used_quota: number
+  paid_count: number
+  paid_amount: number
+  total_quota: number
+}
+
 export type CleaningStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled'
 
 export interface CleaningTask {
@@ -138,6 +163,7 @@ declare global {
       updateRoomStatus(status: RoomStatus): Promise<any>
       deleteRoomStatus(id: number): Promise<boolean>
       batchGenerateRoomStatuses(params: any): Promise<{ count: number; quotaOverflow: number; quotaOverflowDetails: any[] }>
+      batchUpdateRoomStatuses(params: { roomIds: number[]; startDate: string; endDate: string; status: RoomStatusType; is_paid: number; amount?: number }): Promise<{ updated: number }>
       getStatusByRoomAndDate(roomId: number, date: string): Promise<RoomStatus | undefined>
 
       getQuotaConfig(): Promise<QuotaConfig>
@@ -148,10 +174,14 @@ declare global {
       resetMonthlyQuota(month: string): Promise<boolean>
       autoResetQuotaIfNeeded(): Promise<{ reset: boolean; month: string }>
       grantQuota(params: { month?: string; amount: number; remark?: string }): Promise<{ total_quota: number; granted: number }>
+      calibrateMonthlyQuota(month: string): Promise<CalibrateResult>
 
       getConsumptionRecords(params?: any): Promise<ConsumptionRecord[]>
       addConsumptionRecord(record: Partial<ConsumptionRecord>): Promise<{ id: number }>
       getConsumptionSummary(params?: any): Promise<ConsumptionSummary>
+      getConsumptionMonthlySummary(month: string): Promise<ConsumptionMonthlySummary>
+      getConsumptionRoomRanking(month: string): Promise<ConsumptionRoomRanking[]>
+      getRoomDailyConsumption(params: { roomId: number; month: string }): Promise<ConsumptionRecord[]>
 
       getCleaningTasks(params?: any): Promise<CleaningTask[]>
       addCleaningTask(task: Partial<CleaningTask>): Promise<{ id: number }>

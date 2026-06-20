@@ -139,10 +139,14 @@ export function registerDatabaseIpc() {
   ipcMain.handle('db:deleteRoomStatus', (_e, id: number) => {
     const db = getDb()
     const tx = db.transaction((statusId: number) => {
-      const rs = db.prepare('SELECT room_id, date, quota_used, is_paid FROM room_statuses WHERE id = ?').get(statusId) as any
+      const rs = db.prepare('SELECT room_id, date, quota_used, is_paid, amount FROM room_statuses WHERE id = ?').get(statusId) as any
       if (rs) {
+        const month = dayjs(rs.date).format('YYYY-MM')
         if (rs.quota_used) {
-          refundQuotaInternal(db, { month: dayjs(rs.date).format('YYYY-MM'), amount: rs.quota_used })
+          refundQuotaInternal(db, { month, amount: rs.quota_used })
+        }
+        if (rs.is_paid) {
+          refundPaidInternal(db, { month, count: 1, amount: rs.amount || 0 })
         }
         db.prepare('DELETE FROM consumption_records WHERE room_status_id = ?').run(statusId)
       }
@@ -585,6 +589,128 @@ export function registerDatabaseIpc() {
 
     return tx()
   })
+
+  // ==================== 批量更新房态 ====================
+  ipcMain.handle('db:batchUpdateRoomStatuses', (_e, params: any) => {
+    const db = getDb()
+    const tx = db.transaction((p: any) => {
+      const { roomIds, startDate, endDate, status, is_paid, amount, source } = p
+      const config = db.prepare('SELECT paid_price_per_day FROM quota_configs ORDER BY id DESC LIMIT 1').get() as any
+      const paidPrice = config?.paid_price_per_day || 100
+
+      const dateStart = dayjs(startDate)
+      const dateEnd = dayjs(endDate)
+      const days = dateEnd.diff(dateStart, 'day') + 1
+      let updated = 0
+
+      for (const roomId of roomIds) {
+        for (let i = 0; i < days; i++) {
+          const date = dateStart.add(i, 'day').format('YYYY-MM-DD')
+          const existing = db.prepare('SELECT id FROM room_statuses WHERE room_id = ? AND date = ?').get(roomId, date) as { id?: number } | undefined
+
+          if (existing) {
+            saveRoomStatusTransaction(db, {
+              id: existing.id,
+              room_id: roomId,
+              date,
+              status,
+              is_paid,
+              amount: amount || paidPrice,
+              source: source || 'manual'
+            })
+            updated++
+          }
+        }
+      }
+
+      return { updated }
+    })
+    return tx(params)
+  })
+
+  // ==================== 额度校准 ====================
+  ipcMain.handle('db:calibrateMonthlyQuota', (_e, month: string) => {
+    const db = getDb()
+    const tx = db.transaction((m: string) => {
+      const quotaUsedResult = db.prepare(`
+        SELECT COALESCE(SUM(quota_used), 0) as total_used
+        FROM room_statuses
+        WHERE status = 'occupied' AND date LIKE ?
+      `).get(m + '%') as { total_used: number }
+
+      const paidResult = db.prepare(`
+        SELECT COUNT(*) as paid_count, COALESCE(SUM(amount), 0) as paid_amount
+        FROM room_statuses
+        WHERE status = 'occupied' AND is_paid = 1 AND date LIKE ?
+      `).get(m + '%') as { paid_count: number; paid_amount: number }
+
+      const mq = getOrCreateMonthlyQuotaInternal(db, m)
+      db.prepare(`
+        UPDATE monthly_quotas
+        SET used_quota = ?, paid_count = ?, paid_amount = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE month = ?
+      `).run(
+        quotaUsedResult.total_used,
+        paidResult.paid_count,
+        paidResult.paid_amount,
+        m
+      )
+
+      return {
+        month: m,
+        used_quota: quotaUsedResult.total_used,
+        paid_count: paidResult.paid_count,
+        paid_amount: paidResult.paid_amount,
+        total_quota: mq.total_quota
+      }
+    })
+    return tx(month)
+  })
+
+  // ==================== 对账汇总 ====================
+  ipcMain.handle('db:getConsumptionMonthlySummary', (_e, month: string) => {
+    const db = getDb()
+    return db.prepare(`
+      SELECT
+        SUM(CASE WHEN type = 'quota' THEN ABS(quota_used) ELSE 0 END) as quota_used,
+        SUM(CASE WHEN type = 'paid' THEN 1 ELSE 0 END) as paid_count,
+        SUM(CASE WHEN type = 'paid' THEN amount ELSE 0 END) as paid_amount,
+        COUNT(*) as total_records
+      FROM consumption_records
+      WHERE date LIKE ?
+    `).get(month + '%')
+  })
+
+  ipcMain.handle('db:getConsumptionRoomRanking', (_e, month: string) => {
+    const db = getDb()
+    return db.prepare(`
+      SELECT
+        cr.room_id,
+        r.room_no,
+        r.room_name,
+        SUM(CASE WHEN cr.type = 'quota' THEN ABS(cr.quota_used) ELSE 0 END) as quota_used,
+        SUM(CASE WHEN cr.type = 'paid' THEN 1 ELSE 0 END) as paid_count,
+        SUM(CASE WHEN cr.type = 'paid' THEN cr.amount ELSE 0 END) as paid_amount,
+        COUNT(*) as total_days
+      FROM consumption_records cr
+      LEFT JOIN rooms r ON cr.room_id = r.id
+      WHERE cr.date LIKE ?
+      GROUP BY cr.room_id, r.room_no, r.room_name
+      ORDER BY paid_amount DESC, quota_used DESC
+    `).all(month + '%')
+  })
+
+  ipcMain.handle('db:getRoomDailyConsumption', (_e, params: any) => {
+    const db = getDb()
+    const { roomId, month } = params
+    return db.prepare(`
+      SELECT cr.*, r.room_no, r.room_name
+      FROM consumption_records cr
+      LEFT JOIN rooms r ON cr.room_id = r.id
+      WHERE cr.room_id = ? AND cr.date LIKE ?
+      ORDER BY cr.date ASC
+    `).all(roomId, month + '%')
+  })
 }
 
 // ==================== 核心事务：保存房态（新增/更新统一入口） ====================
@@ -608,8 +734,12 @@ function saveRoomStatusTransaction(db: any, s: any) {
       oldStatus = old?.status || ''
       oldAmount = old?.amount || 0
 
+      const oldMonth = dayjs(input.date).format('YYYY-MM')
       if (oldQuotaUsed > 0) {
-        refundQuotaInternal(db, { month: dayjs(input.date).format('YYYY-MM'), amount: oldQuotaUsed })
+        refundQuotaInternal(db, { month: oldMonth, amount: oldQuotaUsed })
+      }
+      if (oldIsPaid > 0) {
+        refundPaidInternal(db, { month: oldMonth, count: 1, amount: oldAmount })
       }
       db.prepare('DELETE FROM consumption_records WHERE room_status_id = ?').run(existing.id)
 
@@ -776,6 +906,22 @@ function refundQuotaInternal(db: any, params: any) {
       const newUsed = Math.max(0, mq.used_quota - (p.amount || 1))
       db.prepare('UPDATE monthly_quotas SET used_quota=?, updated_at=CURRENT_TIMESTAMP WHERE month=?')
         .run(newUsed, p.month)
+    }
+    return true
+  })
+  return tx(params)
+}
+
+function refundPaidInternal(db: any, params: any) {
+  const tx = db.transaction((p: any) => {
+    const mq = db.prepare('SELECT * FROM monthly_quotas WHERE month = ?').get(p.month)
+    if (mq) {
+      const newPaidCount = Math.max(0, (mq.paid_count || 0) - (p.count || 1))
+      const newPaidAmount = Math.max(0, (mq.paid_amount || 0) - (p.amount || 0))
+      db.prepare(`
+        UPDATE monthly_quotas SET paid_count=?, paid_amount=?, updated_at=CURRENT_TIMESTAMP
+        WHERE month=?
+      `).run(newPaidCount, newPaidAmount, p.month)
     }
     return true
   })

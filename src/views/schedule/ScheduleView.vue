@@ -19,6 +19,10 @@
           style="width: 160px; margin-right: 12px;"
           @change="loadData"
         />
+        <el-button @click="openBatchDialog()" style="margin-right: 12px;">
+          <el-icon><Grid /></el-icon>
+          <span>批量调整</span>
+        </el-button>
         <el-button type="primary" @click="openStatusDialog()">
           <el-icon><Plus /></el-icon>
           <span>添加房态</span>
@@ -180,12 +184,66 @@
         <el-button type="primary" @click="handleSaveStatus">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="batchDialogVisible" title="批量调整房态" width="700px" :close-on-click-modal="false">
+      <el-form :model="batchForm" label-width="100px" ref="batchFormRef">
+        <el-form-item label="选择房间" required>
+          <el-select
+            v-model="batchForm.roomIds"
+            multiple
+            collapse-tags
+            collapse-tags-tooltip
+            placeholder="请选择要调整的房间"
+            style="width: 100%">
+            <el-option v-for="r in rooms" :key="r.id" :label="`${r.room_no} - ${r.room_name}`" :value="r.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="日期范围" required>
+          <el-date-picker
+            v-model="batchForm.dateRange"
+            type="daterange"
+            range-separator="至"
+            start-placeholder="开始日期"
+            end-placeholder="结束日期"
+            format="YYYY-MM-DD"
+            value-format="YYYY-MM-DD"
+            style="width: 100%"
+          />
+        </el-form-item>
+        <el-form-item label="调整为" required>
+          <el-radio-group v-model="batchForm.targetStatus">
+            <el-radio value="blocked">锁房</el-radio>
+            <el-radio value="occupied-free">免费占用</el-radio>
+            <el-radio value="occupied-paid">自费占用</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="batchForm.targetStatus === 'occupied-paid'" label="金额(元/天)" required>
+          <el-input-number v-model="batchForm.amount" :min="0" :precision="2" style="width: 100%" />
+        </el-form-item>
+        <el-alert
+          type="info"
+          show-icon
+          title="调整说明"
+          :closable="false"
+          style="margin-top: 8px;">
+          <template #default>
+            将所选日期范围内已存在的房态统一调整为目标状态。<br>
+            <b>注意</b>：只会更新所选日期范围内<b>已经存在</b>的房态记录，不会新增不存在的房态。
+          </template>
+        </el-alert>
+      </el-form>
+      <template #footer>
+        <el-button @click="batchDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="handleBatchSubmit">确认调整</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, watch, reactive } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance } from 'element-plus'
+import { Calendar, Plus, Grid } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import type { Room, RoomStatus, RoomStatusType } from '@/types'
 
@@ -211,6 +269,15 @@ const statusForm = reactive<Partial<RoomStatus>>({
   remarks: ''
 })
 const isPaid = ref(0)
+
+const batchDialogVisible = ref(false)
+const batchFormRef = ref<FormInstance>()
+const batchForm = reactive({
+  roomIds: [] as number[],
+  dateRange: [] as string[],
+  targetStatus: 'blocked' as 'blocked' | 'occupied-free' | 'occupied-paid',
+  amount: 100
+})
 
 const dialogTitle = computed(() => editingId.value ? '编辑房态' : '添加房态')
 
@@ -412,6 +479,64 @@ async function handleDeleteStatus() {
     window.dispatchEvent(new CustomEvent('quota-updated'))
   } catch (e) {
     // 用户取消
+  }
+}
+
+function openBatchDialog() {
+  batchForm.roomIds = []
+  batchForm.dateRange = [
+    dayjs().format('YYYY-MM-DD'),
+    dayjs().add(7, 'day').format('YYYY-MM-DD')
+  ]
+  batchForm.targetStatus = 'blocked'
+  batchForm.amount = 100
+  batchDialogVisible.value = true
+}
+
+async function handleBatchSubmit() {
+  if (!batchForm.roomIds || batchForm.roomIds.length === 0) {
+    ElMessage.warning('请选择要调整的房间')
+    return
+  }
+  if (!batchForm.dateRange || batchForm.dateRange.length !== 2) {
+    ElMessage.warning('请选择日期范围')
+    return
+  }
+  if (batchForm.targetStatus === 'occupied-paid' && (!batchForm.amount || batchForm.amount <= 0)) {
+    ElMessage.warning('请输入自费金额')
+    return
+  }
+
+  let status: RoomStatusType = 'blocked'
+  let is_paid = 0
+  let amount = 0
+
+  if (batchForm.targetStatus === 'occupied-free') {
+    status = 'occupied'
+    is_paid = 0
+    amount = 0
+  } else if (batchForm.targetStatus === 'occupied-paid') {
+    status = 'occupied'
+    is_paid = 1
+    amount = batchForm.amount
+  }
+
+  try {
+    const result = await window.dbApi.batchUpdateRoomStatuses({
+      roomIds: batchForm.roomIds,
+      startDate: batchForm.dateRange[0],
+      endDate: batchForm.dateRange[1],
+      status,
+      is_paid,
+      amount
+    })
+
+    ElMessage.success(`批量调整完成，共更新 ${result.updated} 条记录`)
+    batchDialogVisible.value = false
+    await loadData()
+    window.dispatchEvent(new CustomEvent('quota-updated'))
+  } catch (e: any) {
+    ElMessage.error(e.message || '批量调整失败')
   }
 }
 

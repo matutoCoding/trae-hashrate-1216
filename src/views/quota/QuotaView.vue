@@ -158,6 +158,13 @@
                 <div class="action-desc">过去6个月使用情况</div>
               </div>
             </button>
+            <button class="action-btn calibrate" @click="handleCalibrate">
+              <el-icon :size="20"><Aim /></el-icon>
+              <div class="action-info">
+                <div class="action-title">额度校准</div>
+                <div class="action-desc">按实际房态重算</div>
+              </div>
+            </button>
           </div>
 
           <div style="margin-top:24px;">
@@ -260,6 +267,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance } from 'element-plus'
+import { DataLine, RefreshLeft, Plus, Setting, Aim } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import type { QuotaConfig, MonthlyQuota } from '@/types'
 
@@ -418,6 +426,27 @@ async function handleResetCurrentMonth() {
     const currentMonth = dayjs().format('YYYY-MM')
     await window.dbApi.resetMonthlyQuota(currentMonth)
     ElMessage.success('额度重置成功')
+    await loadMonthlyQuota()
+    window.dispatchEvent(new CustomEvent('quota-updated'))
+  } catch (e) {
+    // 用户取消
+  }
+}
+
+async function handleCalibrate() {
+  try {
+    const currentMonth = dayjs().format('YYYY-MM')
+    const monthCn = dayjs().format('YYYY年MM月')
+    await ElMessageBox.confirm(
+      `确认要校准 ${monthCn} 的额度数据吗？\n将根据当月实际房态记录重新计算：已用额度、自费天数、自费总额，确保数据一致。`,
+      '额度校准确认',
+      { type: 'warning', confirmButtonText: '确认校准', cancelButtonText: '取消' }
+    )
+
+    const result = await window.dbApi.calibrateMonthlyQuota(currentMonth)
+    ElMessage.success(
+      `校准完成！已用额度: ${result.used_quota} 天, 自费: ${result.paid_count} 天/¥${result.paid_amount.toFixed(2)}`
+    )
     await loadMonthlyQuota()
     window.dispatchEvent(new CustomEvent('quota-updated'))
   } catch (e) {
@@ -615,6 +644,25 @@ onMounted(async () => {
     font-size: 12px;
     color: #909399;
     margin-top: 2px;
+  }
+}
+
+.action-btn.calibrate {
+  background: linear-gradient(135deg, #fff7e6, #ffe7ba);
+  border-color: #ffd591;
+  &:hover {
+    background: linear-gradient(135deg, #ffe7ba, #ffd591);
+    border-color: #fa8c16;
+  }
+  :deep(.el-icon) {
+    color: #fa8c16;
+  }
+  .action-title {
+    color: #d46b08;
+    font-weight: 600;
+  }
+  .action-desc {
+    color: #fa8c16;
   }
 }
 </style>
