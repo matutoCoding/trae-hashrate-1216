@@ -128,77 +128,12 @@ export function registerDatabaseIpc() {
 
   ipcMain.handle('db:addRoomStatus', (_e, status: any) => {
     const db = getDb()
-    const tx = db.transaction((s: any) => {
-      const existing = db.prepare('SELECT id FROM room_statuses WHERE room_id = ? AND date = ?').get(s.room_id, s.date) as { id?: number } | undefined
-
-      let statusId: number | bigint
-      let isNew = true
-      let oldQuotaUsed = 0
-      let oldIsPaid = 0
-
-      if (existing) {
-        const old = db.prepare('SELECT quota_used, is_paid, status FROM room_statuses WHERE id = ?').get(existing.id) as any
-        oldQuotaUsed = old?.quota_used || 0
-        oldIsPaid = old?.is_paid || 0
-        if (oldQuotaUsed > 0 && (s.status !== 'occupied' || s.is_paid !== oldIsPaid)) {
-          refundQuotaInternal(db, { month: dayjs(s.date).format('YYYY-MM'), amount: oldQuotaUsed })
-        }
-        if (oldIsPaid) {
-          db.prepare('DELETE FROM consumption_records WHERE room_id = ? AND date = ?').run(s.room_id, s.date)
-        }
-        db.prepare(`
-          UPDATE room_statuses SET status=?, source=?, cycle_rule_id=?, quota_used=?,
-          is_paid=?, amount=?, order_no=?, guest_name=?, guest_phone=?, remarks=?,
-          updated_at=CURRENT_TIMESTAMP
-          WHERE id=?
-        `).run(
-          s.status, s.source || 'manual', s.cycle_rule_id || null,
-          s.quota_used || 0, s.is_paid || 0, s.amount || 0,
-          s.order_no, s.guest_name, s.guest_phone, s.remarks, existing.id
-        )
-        statusId = existing.id as number
-        isNew = false
-      } else {
-        const result = db.prepare(`
-          INSERT INTO room_statuses (room_id, date, status, source, cycle_rule_id,
-          quota_used, is_paid, amount, order_no, guest_name, guest_phone, remarks)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(
-          s.room_id, s.date, s.status, s.source || 'manual', s.cycle_rule_id || null,
-          s.quota_used || 0, s.is_paid || 0, s.amount || 0,
-          s.order_no, s.guest_name, s.guest_phone, s.remarks
-        )
-        statusId = result.lastInsertRowid
-      }
-
-      if (s.status === 'occupied' && !s.is_paid) {
-        if (!existing || (existing && oldQuotaUsed === 0)) {
-          useQuotaInternal(db, {
-            room_status_id: Number(statusId),
-            room_id: s.room_id,
-            date: s.date,
-            month: dayjs(s.date).format('YYYY-MM')
-          })
-        }
-      } else if (s.status === 'occupied' && s.is_paid) {
-        addConsumptionRecordInternal(db, {
-          room_status_id: Number(statusId),
-          room_id: s.room_id,
-          date: s.date,
-          type: 'paid',
-          amount: s.amount || 0,
-          description: `房间${s.date}付费挂房`
-        })
-      }
-
-      return { id: statusId, isNew }
-    })
-
-    return tx(status)
+    return saveRoomStatusTransaction(db, status)
   })
 
   ipcMain.handle('db:updateRoomStatus', (_e, status: any) => {
-    return ipcMainHandlerDbAddRoomStatus(status)
+    const db = getDb()
+    return saveRoomStatusTransaction(db, status)
   })
 
   ipcMain.handle('db:deleteRoomStatus', (_e, id: number) => {
@@ -209,9 +144,7 @@ export function registerDatabaseIpc() {
         if (rs.quota_used) {
           refundQuotaInternal(db, { month: dayjs(rs.date).format('YYYY-MM'), amount: rs.quota_used })
         }
-        if (rs.is_paid) {
-          db.prepare('DELETE FROM consumption_records WHERE room_id = ? AND date = ?').run(rs.room_id, rs.date)
-        }
+        db.prepare('DELETE FROM consumption_records WHERE room_status_id = ?').run(statusId)
       }
       db.prepare('DELETE FROM room_statuses WHERE id = ?').run(statusId)
       return true
@@ -272,46 +205,46 @@ export function registerDatabaseIpc() {
             quotaOverflowDetails.push({ room: room.room_no, date: dateStr })
           }
 
+          let statusId: number | bigint
+
           if (existing) {
             db.prepare(`
               UPDATE room_statuses SET status='occupied', source='cycle', cycle_rule_id=?,
               quota_used=?, is_paid=?, amount=?, updated_at=CURRENT_TIMESTAMP
               WHERE id=?
             `).run(ruleId || null, useQuota, isPaid, amount, existing.id)
-
-            if (useQuota) {
-              updateMonthlyQuotaUsedInternal(db, month, 1)
-            }
-            if (isPaid) {
-              addConsumptionRecordInternal(db, {
-                room_status_id: existing.id,
-                room_id: room.id,
-                date: dateStr,
-                type: 'paid',
-                amount,
-                description: `房间${room.room_no}${dateStr}周期挂房(超额自费)`
-              })
-            }
+            statusId = existing.id as number
           } else {
             const result = db.prepare(`
               INSERT INTO room_statuses (room_id, date, status, source, cycle_rule_id,
               quota_used, is_paid, amount)
               VALUES (?, ?, 'occupied', 'cycle', ?, ?, ?, ?)
             `).run(room.id, dateStr, ruleId || null, useQuota, isPaid, amount)
+            statusId = result.lastInsertRowid
+          }
 
-            if (useQuota) {
-              updateMonthlyQuotaUsedInternal(db, month, 1)
-            }
-            if (isPaid) {
-              addConsumptionRecordInternal(db, {
-                room_status_id: Number(result.lastInsertRowid),
-                room_id: room.id,
-                date: dateStr,
-                type: 'paid',
-                amount,
-                description: `房间${room.room_no}${dateStr}周期挂房(超额自费)`
-              })
-            }
+          if (useQuota) {
+            updateMonthlyQuotaUsedInternal(db, month, 1)
+            addConsumptionRecordInternal(db, {
+              room_status_id: Number(statusId),
+              room_id: room.id,
+              date: dateStr,
+              type: 'quota',
+              amount: 0,
+              quota_used: 1,
+              description: `房间${room.room_no}${dateStr}周期挂房(免费额度)`
+            })
+          }
+          if (isPaid) {
+            addConsumptionRecordInternal(db, {
+              room_status_id: Number(statusId),
+              room_id: room.id,
+              date: dateStr,
+              type: 'paid',
+              amount,
+              quota_used: 0,
+              description: `房间${room.room_no}${dateStr}周期挂房(超额自费)`
+            })
           }
 
           count++
@@ -346,19 +279,33 @@ export function registerDatabaseIpc() {
 
   ipcMain.handle('db:updateQuotaConfig', (_e, config: any) => {
     const db = getDb()
-    const existing = db.prepare('SELECT id FROM quota_configs ORDER BY id DESC LIMIT 1').get() as { id?: number } | undefined
-    if (existing) {
-      db.prepare(`
-        UPDATE quota_configs SET monthly_free_quota=?, paid_price_per_day=?, reset_day=?,
-        updated_at=CURRENT_TIMESTAMP WHERE id=?
-      `).run(config.monthly_free_quota, config.paid_price_per_day, config.reset_day, existing.id)
-    } else {
-      db.prepare(`
-        INSERT INTO quota_configs (monthly_free_quota, paid_price_per_day, reset_day)
-        VALUES (?, ?, ?)
-      `).run(config.monthly_free_quota, config.paid_price_per_day, config.reset_day)
-    }
-    return true
+    const tx = db.transaction((c: any) => {
+      const existing = db.prepare('SELECT id FROM quota_configs ORDER BY id DESC LIMIT 1').get() as { id?: number } | undefined
+      if (existing) {
+        db.prepare(`
+          UPDATE quota_configs SET monthly_free_quota=?, paid_price_per_day=?, reset_day=?,
+          updated_at=CURRENT_TIMESTAMP WHERE id=?
+        `).run(c.monthly_free_quota, c.paid_price_per_day, c.reset_day, existing.id)
+      } else {
+        db.prepare(`
+          INSERT INTO quota_configs (monthly_free_quota, paid_price_per_day, reset_day)
+          VALUES (?, ?, ?)
+        `).run(c.monthly_free_quota, c.paid_price_per_day, c.reset_day)
+      }
+
+      const currentMonth = dayjs().format('YYYY-MM')
+      const mq = db.prepare('SELECT id FROM monthly_quotas WHERE month = ?').get(currentMonth) as { id?: number } | undefined
+      if (mq) {
+        db.prepare('UPDATE monthly_quotas SET total_quota=?, updated_at=CURRENT_TIMESTAMP WHERE month=?')
+          .run(c.monthly_free_quota, currentMonth)
+      } else {
+        db.prepare('INSERT INTO monthly_quotas (month, total_quota, used_quota) VALUES (?, ?, 0)')
+          .run(currentMonth, c.monthly_free_quota)
+      }
+
+      return true
+    })
+    return tx(config)
   })
 
   ipcMain.handle('db:getMonthlyQuota', (_e, month: string) => {
@@ -378,45 +325,7 @@ export function registerDatabaseIpc() {
 
   ipcMain.handle('db:resetMonthlyQuota', (_e, month: string) => {
     const db = getDb()
-    const tx = db.transaction((m: string) => {
-      const config = db.prepare('SELECT monthly_free_quota FROM quota_configs ORDER BY id DESC LIMIT 1').get() as any
-      const quota = config?.monthly_free_quota || 30
-
-      const existing = db.prepare('SELECT id FROM monthly_quotas WHERE month = ?').get(m) as { id?: number } | undefined
-      if (existing) {
-        db.prepare(`
-          UPDATE monthly_quotas SET total_quota=?, used_quota=0, paid_count=0, paid_amount=0,
-          updated_at=CURRENT_TIMESTAMP WHERE month=?
-        `).run(quota, m)
-      } else {
-        db.prepare(`
-          INSERT INTO monthly_quotas (month, total_quota, used_quota)
-          VALUES (?, ?, 0)
-        `).run(m, quota)
-      }
-
-      const statuses = db.prepare(`
-        SELECT id FROM room_statuses
-        WHERE date LIKE ? AND quota_used > 0
-      `).all(m + '%') as any[]
-
-      for (const s of statuses) {
-        db.prepare('UPDATE room_statuses SET quota_used=0, is_paid=1, amount=? WHERE id=?')
-          .run(config?.paid_price_per_day || 100, s.id)
-        const rsInfo = db.prepare('SELECT room_id, date FROM room_statuses WHERE id=?').get(s.id) as any
-        addConsumptionRecordInternal(db, {
-          room_status_id: s.id,
-          room_id: rsInfo.room_id,
-          date: rsInfo.date,
-          type: 'paid',
-          amount: config?.paid_price_per_day || 100,
-          description: '额度重置后转为自费'
-        })
-      }
-
-      return true
-    })
-    return tx(month)
+    return resetMonthlyQuotaNewLogic(db, month)
   })
 
   ipcMain.handle('db:autoResetQuotaIfNeeded', () => {
@@ -426,9 +335,9 @@ export function registerDatabaseIpc() {
     const resetDay = (db.prepare('SELECT reset_day FROM quota_configs ORDER BY id DESC LIMIT 1').get() as any)?.reset_day || 1
 
     if (now.date() === resetDay) {
-      const mq = db.prepare('SELECT updated_at FROM monthly_quotas WHERE month = ?').get(currentMonth) as any
-      if (!mq || dayjs(mq.updated_at).format('YYYY-MM') !== currentMonth) {
-        ipcMainHandlerDbResetMonthlyQuota(currentMonth)
+      const mq = db.prepare('SELECT id, updated_at FROM monthly_quotas WHERE month = ?').get(currentMonth) as any
+      if (!mq) {
+        resetMonthlyQuotaNewLogic(db, currentMonth)
         return { reset: true, month: currentMonth }
       }
     }
@@ -622,9 +531,10 @@ export function registerDatabaseIpc() {
 
     const tx = db.transaction(() => {
       let sql = `
-        SELECT rs.*, r.room_no
+        SELECT rs.id, rs.room_id, rs.date, rs.cycle_rule_id, cr.check_out_time, r.room_no
         FROM room_statuses rs
         LEFT JOIN rooms r ON rs.room_id = r.id
+        LEFT JOIN cycle_rules cr ON rs.cycle_rule_id = cr.id
         WHERE rs.status = 'occupied'
       `
       const args: any[] = []
@@ -642,7 +552,6 @@ export function registerDatabaseIpc() {
       let count = 0
 
       for (const rs of statuses) {
-        const checkOutTime = '12:00'
         const taskDate = rs.date
 
         const existing = db.prepare(
@@ -650,10 +559,17 @@ export function registerDatabaseIpc() {
         ).get(rs.room_id, taskDate)
 
         if (!existing) {
-          const startTimeInt = parseInt(checkOutTime.split(':')[0]) + bufferHours
-          const startTime = `${String(startTimeInt).padStart(2, '0')}:00`
-          const endTimeInt = startTimeInt + cleaningHours
-          const endTime = `${String(endTimeInt).padStart(2, '0')}:00`
+          const checkOutTime = rs.check_out_time || '12:00'
+          const [checkOutH, checkOutM] = checkOutTime.split(':').map(Number)
+          const totalBufferMin = (checkOutH || 0) * 60 + (checkOutM || 0) + bufferHours * 60
+          const startHour = Math.floor(totalBufferMin / 60)
+          const startMin = totalBufferMin % 60
+          const startTime = `${String(startHour).padStart(2, '0')}:${String(startMin).padStart(2, '0')}`
+
+          const endTotalMin = totalBufferMin + cleaningHours * 60
+          const endHour = Math.floor(endTotalMin / 60)
+          const endMin = endTotalMin % 60
+          const endTime = `${String(endHour).padStart(2, '0')}:${String(endMin).padStart(2, '0')}`
 
           db.prepare(`
             INSERT INTO cleaning_tasks (room_id, room_status_id, task_date,
@@ -671,89 +587,124 @@ export function registerDatabaseIpc() {
   })
 }
 
-// ==================== 内部辅助函数 ====================
-function ipcMainHandlerDbAddRoomStatus(status: any) {
-  const db = getDb()
-  const tx = db.transaction((s: any) => {
-    const existing = db.prepare('SELECT id FROM room_statuses WHERE room_id = ? AND date = ?').get(s.room_id, s.date) as { id?: number } | undefined
+// ==================== 核心事务：保存房态（新增/更新统一入口） ====================
+function saveRoomStatusTransaction(db: any, s: any) {
+  const tx = db.transaction((input: any) => {
+    const config = db.prepare('SELECT paid_price_per_day FROM quota_configs ORDER BY id DESC LIMIT 1').get() as any
+    const paidPrice = config?.paid_price_per_day || 100
+
+    const existing = db.prepare('SELECT id FROM room_statuses WHERE room_id = ? AND date = ?').get(input.room_id, input.date) as { id?: number } | undefined
 
     let statusId: number | bigint
     let oldQuotaUsed = 0
     let oldIsPaid = 0
+    let oldStatus = ''
+    let oldAmount = 0
 
     if (existing) {
-        const old = db.prepare('SELECT quota_used, is_paid, status FROM room_statuses WHERE id = ?').get(existing.id) as any
-        oldQuotaUsed = old?.quota_used || 0
-        oldIsPaid = old?.is_paid || 0
-        if (oldQuotaUsed > 0 && (s.status !== 'occupied' || s.is_paid !== oldIsPaid)) {
-          refundQuotaInternal(db, { month: dayjs(s.date).format('YYYY-MM'), amount: oldQuotaUsed })
-        }
-        if (oldIsPaid && (!s.is_paid || s.status !== 'occupied')) {
-          db.prepare('DELETE FROM consumption_records WHERE room_id = ? AND date = ?').run(s.room_id, s.date)
-        }
-        db.prepare(`
-          UPDATE room_statuses SET status=?, source=?, cycle_rule_id=?, quota_used=?,
-          is_paid=?, amount=?, order_no=?, guest_name=?, guest_phone=?, remarks=?,
-          updated_at=CURRENT_TIMESTAMP
-          WHERE id=?
-        `).run(
-          s.status, s.source || 'manual', s.cycle_rule_id || null,
-          s.quota_used || 0, s.is_paid || 0, s.amount || 0,
-          s.order_no, s.guest_name, s.guest_phone, s.remarks, existing.id
-        )
-        statusId = existing.id as number
+      const old = db.prepare('SELECT quota_used, is_paid, status, amount FROM room_statuses WHERE id = ?').get(existing.id) as any
+      oldQuotaUsed = old?.quota_used || 0
+      oldIsPaid = old?.is_paid || 0
+      oldStatus = old?.status || ''
+      oldAmount = old?.amount || 0
+
+      if (oldQuotaUsed > 0) {
+        refundQuotaInternal(db, { month: dayjs(input.date).format('YYYY-MM'), amount: oldQuotaUsed })
+      }
+      db.prepare('DELETE FROM consumption_records WHERE room_status_id = ?').run(existing.id)
+
+      db.prepare(`
+        UPDATE room_statuses SET status=?, source=?, cycle_rule_id=?, quota_used=?,
+        is_paid=?, amount=?, order_no=?, guest_name=?, guest_phone=?, remarks=?,
+        updated_at=CURRENT_TIMESTAMP
+        WHERE id=?
+      `).run(
+        input.status, input.source || 'manual', input.cycle_rule_id || null,
+        0, 0, 0,
+        input.order_no, input.guest_name, input.guest_phone, input.remarks, existing.id
+      )
+      statusId = existing.id as number
     } else {
       const result = db.prepare(`
         INSERT INTO room_statuses (room_id, date, status, source, cycle_rule_id,
         quota_used, is_paid, amount, order_no, guest_name, guest_phone, remarks)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?)
       `).run(
-        s.room_id, s.date, s.status, s.source || 'manual', s.cycle_rule_id || null,
-        s.quota_used || 0, s.is_paid || 0, s.amount || 0,
-        s.order_no, s.guest_name, s.guest_phone, s.remarks
+        input.room_id, input.date, input.status, input.source || 'manual', input.cycle_rule_id || null,
+        input.order_no, input.guest_name, input.guest_phone, input.remarks
       )
       statusId = result.lastInsertRowid
     }
 
-    if (s.status === 'occupied' && !s.is_paid) {
-      if (!existing || (existing && oldQuotaUsed === 0)) {
-        useQuotaInternal(db, {
-          room_status_id: Number(statusId),
-          room_id: s.room_id,
-          date: s.date,
-          month: dayjs(s.date).format('YYYY-MM')
-        })
-      }
-    } else if (s.status === 'occupied' && s.is_paid) {
-      if (!oldIsPaid) {
+    const month = dayjs(input.date).format('YYYY-MM')
+    const mq = getOrCreateMonthlyQuotaInternal(db, month)
+
+    if (input.status === 'occupied' && input.is_paid) {
+      const finalAmount = input.amount || paidPrice
+      db.prepare('UPDATE room_statuses SET quota_used=0, is_paid=1, amount=? WHERE id=?')
+        .run(finalAmount, statusId)
+      addConsumptionRecordInternal(db, {
+        room_status_id: Number(statusId),
+        room_id: input.room_id,
+        date: input.date,
+        type: 'paid',
+        amount: finalAmount,
+        quota_used: 0,
+        description: input.source === 'cycle'
+          ? `周期挂房(自费)`
+          : `手动挂房(自费)`
+      })
+    } else if (input.status === 'occupied' && !input.is_paid) {
+      if (mq.used_quota < mq.total_quota) {
+        db.prepare('UPDATE room_statuses SET quota_used=1, is_paid=0, amount=0 WHERE id=?')
+          .run(statusId)
+        updateMonthlyQuotaUsedInternal(db, month, 1)
         addConsumptionRecordInternal(db, {
           room_status_id: Number(statusId),
-          room_id: s.room_id,
-          date: s.date,
+          room_id: input.room_id,
+          date: input.date,
+          type: 'quota',
+          amount: 0,
+          quota_used: 1,
+          description: input.source === 'cycle'
+            ? `周期挂房(免费额度)`
+            : `手动挂房(免费额度)`
+        })
+      } else {
+        const finalAmount = input.amount || paidPrice
+        db.prepare('UPDATE room_statuses SET quota_used=0, is_paid=1, amount=? WHERE id=?')
+          .run(finalAmount, statusId)
+        addConsumptionRecordInternal(db, {
+          room_status_id: Number(statusId),
+          room_id: input.room_id,
+          date: input.date,
           type: 'paid',
-          amount: s.amount || 0,
-          description: `房间${s.date}付费挂房`
+          amount: finalAmount,
+          quota_used: 0,
+          description: '额度不足，自动转自费'
         })
       }
     }
 
     return { id: statusId, isNew: !existing }
   })
-  return tx(status)
+
+  return tx(s)
 }
 
-function ipcMainHandlerDbResetMonthlyQuota(month: string) {
-  const db = getDb()
+// ==================== 额度重置：只发放新月份额度，不改动已有房态 ====================
+function resetMonthlyQuotaNewLogic(db: any, month: string) {
   const tx = db.transaction((m: string) => {
     const config = db.prepare('SELECT monthly_free_quota, paid_price_per_day FROM quota_configs ORDER BY id DESC LIMIT 1').get() as any
     const quota = config?.monthly_free_quota || 30
 
-    const existing = db.prepare('SELECT id FROM monthly_quotas WHERE month = ?').get(m) as { id?: number } | undefined
+    const existing = db.prepare('SELECT id, used_quota FROM monthly_quotas WHERE month = ?').get(m) as { id?: number; used_quota?: number } | undefined
+
     if (existing) {
+      const newUsed = existing.used_quota || 0
       db.prepare(`
-        UPDATE monthly_quotas SET total_quota=?, used_quota=0, paid_count=0, paid_amount=0,
-        updated_at=CURRENT_TIMESTAMP WHERE month=?
-      `).run(quota, m)
+        UPDATE monthly_quotas SET total_quota=?, used_quota=?, updated_at=CURRENT_TIMESTAMP WHERE month=?
+      `).run(quota, newUsed, m)
     } else {
       db.prepare(`
         INSERT INTO monthly_quotas (month, total_quota, used_quota)
@@ -761,29 +712,12 @@ function ipcMainHandlerDbResetMonthlyQuota(month: string) {
       `).run(m, quota)
     }
 
-    const statuses = db.prepare(`
-      SELECT id, room_id, date FROM room_statuses
-      WHERE date LIKE ? AND quota_used > 0
-    `).all(m + '%') as any[]
-
-    for (const s of statuses) {
-      db.prepare('UPDATE room_statuses SET quota_used=0, is_paid=1, amount=? WHERE id=?')
-        .run(config?.paid_price_per_day || 100, s.id)
-      addConsumptionRecordInternal(db, {
-        room_status_id: s.id,
-        room_id: s.room_id,
-        date: s.date,
-        type: 'paid',
-        amount: config?.paid_price_per_day || 100,
-        description: '额度重置后转为自费'
-      })
-    }
-
     return true
   })
   return tx(month)
 }
 
+// ==================== 内部辅助函数 ====================
 function getOrCreateMonthlyQuotaInternal(db: any, month: string) {
   const existing = db.prepare('SELECT * FROM monthly_quotas WHERE month = ?').get(month)
   if (existing) return existing
@@ -815,7 +749,7 @@ function useQuotaInternal(db: any, params: any) {
     }
 
     if (p.room_status_id && usedQuota) {
-      db.prepare('UPDATE room_statuses SET quota_used=1, is_paid=0 WHERE id=?').run(p.room_status_id)
+      db.prepare('UPDATE room_statuses SET quota_used=1, is_paid=0, amount=0 WHERE id=?').run(p.room_status_id)
     }
     if (p.room_status_id && isPaid) {
       db.prepare('UPDATE room_statuses SET quota_used=0, is_paid=1, amount=? WHERE id=?').run(paidPrice, p.room_status_id)
@@ -825,6 +759,7 @@ function useQuotaInternal(db: any, params: any) {
         date: p.date,
         type: 'paid',
         amount: paidPrice,
+        quota_used: 0,
         description: '额度不足，自动转自费'
       })
     }

@@ -93,7 +93,7 @@ async function loadQuotaInfo() {
 async function handleResetQuota() {
   try {
     await ElMessageBox.confirm(
-      '确认要重置本月额度吗？已使用的免费额度将全部转为自费记录。',
+      '确认要重置本月额度吗？将按当前配置重新发放当月免费额度，已有房态不会被改动。',
       '额度重置确认',
       { type: 'warning', confirmButtonText: '确认重置', cancelButtonText: '取消' }
     )

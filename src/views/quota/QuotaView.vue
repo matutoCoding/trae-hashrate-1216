@@ -141,7 +141,7 @@
               <el-icon :size="20"><RefreshLeft /></el-icon>
               <div class="action-info">
                 <div class="action-title">重置本月额度</div>
-                <div class="action-desc">已用额度转自费</div>
+                <div class="action-desc">重新发放月度额度</div>
               </div>
             </button>
             <button class="action-btn" @click="openManualGrant">
@@ -197,9 +197,9 @@
           style="margin-top:16px;"
         >
           <div style="line-height:1.8;">
-            1. 每月重置日自动重置免费额度，不累加到下月<br>
+            1. 每月重置日为当月发放免费额度，不累加到下月<br>
             2. 额度用完后挂房自动转为自费<br>
-            3. 手动重置将把当月已用额度全部转为自费
+            3. 手动重置仅重新发放当月额度，不影响已有房态
           </div>
         </el-alert>
       </el-form>
@@ -411,7 +411,7 @@ function viewMonthHistory() {
 async function handleResetCurrentMonth() {
   try {
     await ElMessageBox.confirm(
-      '确认要重置本月额度吗？\n本月已使用的免费额度将全部转为自费记录，此操作不可撤销。',
+      '确认要重置本月额度吗？\n将按当前配置重新发放当月免费额度，已有房态不会被改动。',
       '额度重置确认',
       { type: 'warning', confirmButtonText: '确认重置', cancelButtonText: '取消' }
     )
