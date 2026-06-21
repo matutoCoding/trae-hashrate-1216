@@ -246,74 +246,106 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="batchLogDialogVisible" title="批量操作记录" width="800px">
-      <div v-if="lastBatchLog" class="batch-log-detail">
-        <el-descriptions :column="2" border size="small">
+    <el-dialog v-model="batchLogDialogVisible" title="批量操作记录" width="900px">
+      <div class="batch-log-tabs">
+        <div
+          v-for="log in batchOperationLogs"
+          :key="log.id"
+          class="batch-log-item"
+          :class="{ active: log.id === selectedLogId }"
+          @click="selectLog(log)"
+        >
+          <div class="log-header">
+            <el-tag :type="log.is_revert ? 'info' : 'primary'" size="small">
+              {{ log.is_revert ? '撤销操作' : '批量调整' }}
+            </el-tag>
+            <span class="log-time">{{ formatDateTime(log.created_at) }}</span>
+            <span class="log-count">影响 {{ log.affected_count }} 条</span>
+          </div>
+          <div class="log-target">
+            <span v-if="log.is_revert" style="color:#909399;">↩️ 撤销之前的批量操作</span>
+            <span v-else-if="log.target_status === 'blocked'" style="color:#909399;">🔒 锁房</span>
+            <span v-else-if="log.target_is_paid === 1" style="color:#f56c6c;">💰 自费占用 ¥{{ log.target_amount }}/天</span>
+            <span v-else style="color:#67c23a;">🎁 免费占用</span>
+          </div>
+        </div>
+        <el-empty v-if="batchOperationLogs.length === 0" description="暂无批量操作记录" :image-size="80" />
+      </div>
+
+      <div v-if="selectedLog" class="batch-log-detail">
+        <el-descriptions :column="2" border size="small" class="mb-16">
           <el-descriptions-item label="操作时间">
-            {{ formatDateTime(lastBatchLog.created_at) }}
+            {{ formatDateTime(selectedLog.created_at) }}
           </el-descriptions-item>
           <el-descriptions-item label="操作类型">
-            <el-tag type="primary">批量调整</el-tag>
+            <el-tag :type="selectedLog.is_revert ? 'info' : 'primary'">
+              {{ selectedLog.is_revert ? '撤销操作' : '批量调整' }}
+            </el-tag>
           </el-descriptions-item>
           <el-descriptions-item label="操作人">
-            {{ lastBatchLog.operator === 'manual' ? '手动操作' : lastBatchLog.operator }}
+            {{ selectedLog.operator === 'manual' ? '手动操作' : selectedLog.operator }}
           </el-descriptions-item>
           <el-descriptions-item label="影响记录数">
-            <span style="color:#409eff;font-weight:600;">{{ lastBatchLog.affected_count }}</span> 条
+            <span style="color:#409eff;font-weight:600;">{{ selectedLog.affected_count }}</span> 条
           </el-descriptions-item>
           <el-descriptions-item label="日期范围">
-            {{ lastBatchLog.start_date }} ~ {{ lastBatchLog.end_date }}
+            {{ selectedLog.start_date }} ~ {{ selectedLog.end_date }}
           </el-descriptions-item>
           <el-descriptions-item label="调整目标">
-            <span v-if="lastBatchLog.target_status === 'blocked'" style="color:#909399;">🔒 锁房</span>
-            <span v-else-if="lastBatchLog.target_is_paid === 1" style="color:#f56c6c;">💰 自费占用 ¥{{ lastBatchLog.target_amount }}/天</span>
+            <span v-if="selectedLog.is_revert" style="color:#909399;">恢复原始状态</span>
+            <span v-else-if="selectedLog.target_status === 'blocked'" style="color:#909399;">🔒 锁房</span>
+            <span v-else-if="selectedLog.target_is_paid === 1" style="color:#f56c6c;">💰 自费占用 ¥{{ selectedLog.target_amount }}/天</span>
             <span v-else style="color:#67c23a;">🎁 免费占用</span>
           </el-descriptions-item>
         </el-descriptions>
 
-        <div style="margin-top:16px;">
-          <div style="margin-bottom:8px;color:#606266;font-weight:500;">变更明细（共 {{ batchSnapshot.length }} 条）</div>
-          <el-table :data="batchSnapshot" border stripe height="360">
-            <el-table-column prop="room_id" label="房间ID" width="80" align="center" />
+        <div>
+          <div class="section-title mb-12">
+            <span>变更明细（共 {{ currentSnapshot.length }} 条）</span>
+          </div>
+          <el-table :data="currentSnapshot" border stripe height="320">
+            <el-table-column type="index" label="序号" width="60" align="center" />
+            <el-table-column prop="room_no" label="房间号" width="100" />
+            <el-table-column prop="room_name" label="房间名称" width="140" show-overflow-tooltip />
             <el-table-column prop="date" label="日期" width="130" />
-            <el-table-column label="原状态" width="120" align="center">
+            <el-table-column label="原状态 → 新状态" width="200" align="center">
               <template #default="{ row }">
-                <el-tag v-if="row.status === 'blocked'" type="info" size="small">锁房</el-tag>
-                <el-tag v-else-if="row.is_paid === 1" type="danger" size="small">自费</el-tag>
-                <el-tag v-else type="success" size="small">免费</el-tag>
+                <div class="status-transition">
+                  <el-tag v-if="row.status === 'blocked'" type="info" size="small">锁房</el-tag>
+                  <el-tag v-else-if="row.is_paid === 1" type="danger" size="small">自费</el-tag>
+                  <el-tag v-else type="success" size="small">免费</el-tag>
+                  <el-icon class="arrow-icon"><Right /></el-icon>
+                  <el-tag v-if="row.new_status === 'blocked'" type="info" size="small">锁房</el-tag>
+                  <el-tag v-else-if="row.new_is_paid === 1" type="danger" size="small">自费</el-tag>
+                  <el-tag v-else type="success" size="small">免费</el-tag>
+                </div>
               </template>
             </el-table-column>
-            <el-table-column label="原金额(元)" width="110" align="right">
+            <el-table-column label="金额变更" width="180" align="right">
               <template #default="{ row }">
-                <span v-if="row.is_paid === 1">¥{{ row.amount.toFixed(2) }}</span>
+                <span v-if="row.is_paid === 1" style="color:#f56c6c;">¥{{ row.amount.toFixed(2) }}</span>
                 <span v-else style="color:#c0c4cc;">-</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="原额度使用" width="100" align="center">
-              <template #default="{ row }">
-                <span v-if="row.quota_used > 0" style="color:#67c23a;">{{ row.quota_used }} 天</span>
+                <el-icon class="arrow-icon"><Right /></el-icon>
+                <span v-if="row.new_is_paid === 1" style="color:#f56c6c;font-weight:600;">¥{{ row.new_amount.toFixed(2) }}</span>
                 <span v-else style="color:#c0c4cc;">-</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="新状态" width="120" align="center">
-              <template #default>
-                <el-tag v-if="lastBatchLog.target_status === 'blocked'" type="info" size="small">锁房</el-tag>
-                <el-tag v-else-if="lastBatchLog.target_is_paid === 1" type="danger" size="small">自费</el-tag>
-                <el-tag v-else type="success" size="small">免费</el-tag>
               </template>
             </el-table-column>
           </el-table>
         </div>
 
         <div style="margin-top:16px;text-align:right;">
-          <el-button type="warning" @click="handleRevertLastBatch">
+          <el-button
+            v-if="!selectedLog.is_revert && selectedLog.id === latestNonRevertLogId"
+            type="warning"
+            @click="handleRevertLastBatch"
+          >
             <el-icon><RefreshLeft /></el-icon>
             <span>撤销此操作</span>
           </el-button>
           <el-button type="primary" @click="batchLogDialogVisible = false">关闭</el-button>
         </div>
       </div>
-      <el-empty v-else description="暂无批量操作记录" />
+      <el-empty v-else-if="batchOperationLogs.length > 0" description="请选择左侧记录查看详情" :image-size="80" />
     </el-dialog>
   </div>
 </template>
@@ -321,7 +353,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch, reactive } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance } from 'element-plus'
-import { Calendar, Plus, Grid, RefreshLeft, Document } from '@element-plus/icons-vue'
+import { Calendar, Plus, Grid, RefreshLeft, Document, Right } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import type { Room, RoomStatus, RoomStatusType, BatchOperationLog, BatchOperationSnapshotItem } from '@/types'
 
@@ -358,10 +390,19 @@ const batchForm = reactive({
 })
 
 const batchLogDialogVisible = ref(false)
-const lastBatchLog = ref<BatchOperationLog | null>(null)
-const batchSnapshot = ref<BatchOperationSnapshotItem[]>([])
+const batchOperationLogs = ref<BatchOperationLog[]>([])
+const selectedLogId = ref<number | null>(null)
+const selectedLog = ref<BatchOperationLog | null>(null)
+const currentSnapshot = ref<BatchOperationSnapshotItem[]>([])
 
-const hasLastBatch = computed(() => !!lastBatchLog.value)
+const latestNonRevertLogId = computed(() => {
+  const log = batchOperationLogs.value.find(l => !l.is_revert)
+  return log?.id || null
+})
+
+const hasLastBatch = computed(() => {
+  return batchOperationLogs.value.some(l => !l.is_revert)
+})
 
 const dialogTitle = computed(() => editingId.value ? '编辑房态' : '添加房态')
 
@@ -618,41 +659,57 @@ async function handleBatchSubmit() {
     ElMessage.success(`批量调整完成，共更新 ${result.updated} 条记录`)
     batchDialogVisible.value = false
     await loadData()
-    await loadLastBatchOperation()
+    await loadBatchOperationLogs()
     window.dispatchEvent(new CustomEvent('quota-updated'))
   } catch (e: any) {
     ElMessage.error(e.message || '批量调整失败')
   }
 }
 
-async function loadLastBatchOperation() {
+async function loadBatchOperationLogs() {
   try {
-    lastBatchLog.value = (await window.dbApi.getLastBatchOperation()) || null
-    if (lastBatchLog.value?.snapshot) {
-      batchSnapshot.value = JSON.parse(lastBatchLog.value.snapshot)
-    } else {
-      batchSnapshot.value = []
+    batchOperationLogs.value = await window.dbApi.getBatchOperationLogs()
+    if (batchOperationLogs.value.length > 0 && !selectedLogId.value) {
+      selectLog(batchOperationLogs.value[0])
     }
   } catch (e) {
-    lastBatchLog.value = null
-    batchSnapshot.value = []
+    batchOperationLogs.value = []
   }
 }
 
-function openBatchLogDialog() {
-  loadLastBatchOperation()
+function selectLog(log: BatchOperationLog) {
+  selectedLogId.value = log.id
+  selectedLog.value = log
+  if (log.snapshot) {
+    currentSnapshot.value = JSON.parse(log.snapshot)
+  } else {
+    currentSnapshot.value = []
+  }
+}
+
+async function openBatchLogDialog() {
+  await loadBatchOperationLogs()
+  selectedLogId.value = null
+  selectedLog.value = null
+  currentSnapshot.value = []
   batchLogDialogVisible.value = true
 }
 
 async function handleRevertLastBatch() {
-  if (!lastBatchLog.value) {
+  if (!latestNonRevertLogId.value) {
+    ElMessage.warning('没有可撤销的批量操作')
+    return
+  }
+
+  const latestLog = batchOperationLogs.value.find(l => l.id === latestNonRevertLogId.value)
+  if (!latestLog) {
     ElMessage.warning('没有可撤销的批量操作')
     return
   }
 
   try {
     await ElMessageBox.confirm(
-      `确认要撤销 ${formatDateTime(lastBatchLog.value.created_at)} 的批量操作吗？\n共 ${lastBatchLog.value.affected_count} 条记录将恢复到调整前的状态。`,
+      `确认要撤销 ${formatDateTime(latestLog.created_at)} 的批量操作吗？\n共 ${latestLog.affected_count} 条记录将恢复到调整前的状态。`,
       '撤销确认',
       { type: 'warning', confirmButtonText: '确认撤销', cancelButtonText: '取消' }
     )
@@ -662,7 +719,7 @@ async function handleRevertLastBatch() {
       ElMessage.success(`撤销成功，共恢复 ${result.reverted} 条记录`)
       batchLogDialogVisible.value = false
       await loadData()
-      await loadLastBatchOperation()
+      await loadBatchOperationLogs()
       window.dispatchEvent(new CustomEvent('quota-updated'))
     } else {
       ElMessage.error(result.message || '撤销失败')
@@ -681,7 +738,7 @@ watch(viewMode, loadData)
 
 onMounted(async () => {
   await loadData()
-  await loadLastBatchOperation()
+  await loadBatchOperationLogs()
 })
 </script>
 
@@ -906,5 +963,81 @@ onMounted(async () => {
 
 .row-cell.weekend {
   background-color: rgba(245, 108, 108, 0.03);
+}
+
+.batch-log-tabs {
+  display: flex;
+  gap: 12px;
+  max-height: 400px;
+  overflow-y: auto;
+  padding-right: 8px;
+  margin-bottom: 16px;
+  border-bottom: 1px dashed #ebeef5;
+  padding-bottom: 16px;
+}
+
+.batch-log-item {
+  flex: 1;
+  min-width: 180px;
+  padding: 12px;
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+
+  &:hover {
+    border-color: #409eff;
+    background: #f5f7fa;
+  }
+
+  &.active {
+    border-color: #409eff;
+    background: #ecf5ff;
+  }
+}
+
+.log-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.log-time {
+  flex: 1;
+  font-size: 12px;
+  color: #606266;
+}
+
+.log-count {
+  font-size: 12px;
+  color: #409eff;
+  font-weight: 600;
+}
+
+.log-target {
+  font-size: 13px;
+  color: #303133;
+}
+
+.status-transition {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.arrow-icon {
+  color: #909399;
+  font-size: 14px;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #303133;
 }
 </style>

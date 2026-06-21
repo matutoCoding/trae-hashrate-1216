@@ -141,9 +141,19 @@ function createTables() {
       end_date TEXT NOT NULL,
       affected_count INTEGER NOT NULL DEFAULT 0,
       snapshot TEXT NOT NULL,
+      parent_id INTEGER,
+      is_revert INTEGER DEFAULT 0,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
   `)
+
+  // 升级已有数据库字段
+  try {
+    dbInstance.prepare('ALTER TABLE batch_operation_logs ADD COLUMN parent_id INTEGER').run()
+  } catch (e) { /* 字段已存在，忽略 */ }
+  try {
+    dbInstance.prepare('ALTER TABLE batch_operation_logs ADD COLUMN is_revert INTEGER DEFAULT 0').run()
+  } catch (e) { /* 字段已存在，忽略 */ }
 }
 
 function initDefaultData() {

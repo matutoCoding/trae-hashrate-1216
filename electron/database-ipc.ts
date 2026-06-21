@@ -610,11 +610,20 @@ export function registerDatabaseIpc() {
       for (const roomId of roomIds) {
         for (let i = 0; i < days; i++) {
           const date = dateStart.add(i, 'day').format('YYYY-MM-DD')
-          const existing = db.prepare(
-            'SELECT id, room_id, date, status, is_paid, amount, quota_used FROM room_statuses WHERE room_id = ? AND date = ?'
-          ).get(roomId, date) as any
+          const existing = db.prepare(`
+            SELECT rs.id, rs.room_id, rs.date, rs.status, rs.is_paid, rs.amount, rs.quota_used,
+                   r.room_no, r.room_name
+            FROM room_statuses rs
+            LEFT JOIN rooms r ON rs.room_id = r.id
+            WHERE rs.room_id = ? AND rs.date = ?
+          `).get(roomId, date) as any
           if (existing) {
-            snapshot.push({ ...existing })
+            snapshot.push({
+              ...existing,
+              new_status: status,
+              new_is_paid: is_paid,
+              new_amount: amount || paidPrice
+            })
           }
         }
       }
@@ -670,8 +679,17 @@ export function registerDatabaseIpc() {
     const db = getDb()
     return db.prepare(`
       SELECT * FROM batch_operation_logs
+      WHERE is_revert = 0
       ORDER BY id DESC LIMIT 1
     `).get()
+  })
+
+  ipcMain.handle('db:getBatchOperationLogs', () => {
+    const db = getDb()
+    return db.prepare(`
+      SELECT * FROM batch_operation_logs
+      ORDER BY id DESC LIMIT 50
+    `).all() as any[]
   })
 
   ipcMain.handle('db:revertLastBatchOperation', () => {
@@ -679,6 +697,7 @@ export function registerDatabaseIpc() {
     const tx = db.transaction(() => {
       const lastLog = db.prepare(`
         SELECT * FROM batch_operation_logs
+        WHERE is_revert = 0
         ORDER BY id DESC LIMIT 1
       `).get() as any
 
@@ -687,9 +706,27 @@ export function registerDatabaseIpc() {
       }
 
       const snapshot = JSON.parse(lastLog.snapshot)
+      const revertSnapshot: any[] = []
       let reverted = 0
 
       for (const old of snapshot) {
+        const current = db.prepare(`
+          SELECT rs.id, rs.room_id, rs.date, rs.status, rs.is_paid, rs.amount, rs.quota_used,
+                 r.room_no, r.room_name
+          FROM room_statuses rs
+          LEFT JOIN rooms r ON rs.room_id = r.id
+          WHERE rs.id = ?
+        `).get(old.id) as any
+
+        if (current) {
+          revertSnapshot.push({
+            ...current,
+            new_status: old.status,
+            new_is_paid: old.is_paid,
+            new_amount: old.amount
+          })
+        }
+
         saveRoomStatusTransaction(db, {
           id: old.id,
           room_id: old.room_id,
@@ -702,7 +739,26 @@ export function registerDatabaseIpc() {
         reverted++
       }
 
-      db.prepare('DELETE FROM batch_operation_logs WHERE id = ?').run(lastLog.id)
+      if (reverted > 0 && revertSnapshot.length > 0) {
+        db.prepare(`
+          INSERT INTO batch_operation_logs (
+            operation_type, operator, target_status, target_is_paid, target_amount,
+            room_ids, start_date, end_date, affected_count, snapshot, parent_id, is_revert
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        `).run(
+          'batch_revert',
+          'manual',
+          'revert',
+          0,
+          0,
+          lastLog.room_ids,
+          lastLog.start_date,
+          lastLog.end_date,
+          reverted,
+          JSON.stringify(revertSnapshot),
+          lastLog.id
+        )
+      }
 
       return { success: true, reverted }
     })
@@ -781,8 +837,8 @@ export function registerDatabaseIpc() {
     `).get(datePattern, ...roomArgs) as any
 
     const totalRoomsResult = db.prepare(`
-      SELECT COUNT(*) as total_rooms FROM rooms WHERE status = 'active'
-    `).get() as { total_rooms: number }
+      SELECT COUNT(*) as total_rooms FROM rooms WHERE status = 'active' ${roomFilter}
+    `).get(...roomArgs) as { total_rooms: number }
     const totalRooms = totalRoomsResult.total_rooms || 0
 
     const daysInMonth = month ? dayjs(month + '-01').daysInMonth() : dayjs().daysInMonth()
@@ -856,6 +912,65 @@ export function registerDatabaseIpc() {
     `).all().map((r: any) => r.floor)
   })
 
+  ipcMain.handle('db:getDashboardTrend', (_e, params: any) => {
+    const db = getDb()
+    const { roomType, floor } = params || {}
+
+    let roomFilter = ''
+    const roomArgs: any[] = []
+
+    if (roomType) {
+      roomFilter += ' AND r.room_type = ?'
+      roomArgs.push(roomType)
+    }
+    if (floor) {
+      roomFilter += ' AND r.floor = ?'
+      roomArgs.push(floor)
+    }
+
+    const months: string[] = []
+    const today = dayjs()
+    for (let i = 5; i >= 0; i--) {
+      months.push(today.subtract(i, 'month').format('YYYY-MM'))
+    }
+
+    const result: any[] = []
+    for (const month of months) {
+      const datePattern = month + '%'
+      const stats = db.prepare(`
+        SELECT
+          SUM(CASE WHEN rs.status = 'occupied' THEN 1 ELSE 0 END) as occupied_days,
+          SUM(CASE WHEN rs.status = 'occupied' AND rs.is_paid = 0 THEN rs.quota_used ELSE 0 END) as quota_used,
+          SUM(CASE WHEN rs.status = 'occupied' AND rs.is_paid = 1 THEN rs.amount ELSE 0 END) as paid_amount
+        FROM room_statuses rs
+        LEFT JOIN rooms r ON rs.room_id = r.id
+        WHERE rs.date LIKE ? ${roomFilter}
+      `).get(datePattern, ...roomArgs) as any
+
+      const totalRoomsResult = db.prepare(`
+        SELECT COUNT(*) as total_rooms FROM rooms WHERE status = 'active' ${roomFilter}
+      `).get(...roomArgs) as { total_rooms: number }
+      const totalRooms = totalRoomsResult.total_rooms || 0
+      const daysInMonth = dayjs(month + '-01').daysInMonth()
+      const totalAvailableRoomDays = totalRooms * daysInMonth
+      const occupancyRate = totalAvailableRoomDays > 0
+        ? Math.round(((stats.occupied_days || 0) / totalAvailableRoomDays) * 10000) / 100
+        : 0
+
+      result.push({
+        month,
+        occupied_days: stats.occupied_days || 0,
+        quota_used: stats.quota_used || 0,
+        paid_amount: stats.paid_amount || 0,
+        occupancy_rate: occupancyRate,
+        total_rooms: totalRooms,
+        days_in_month: daysInMonth
+      })
+    }
+
+    return result
+  })
+
   // ==================== 对账差异核对 ====================
   ipcMain.handle('db:getReconciliationDiff', (_e, month: string) => {
     const db = getDb()
@@ -924,6 +1039,7 @@ export function registerDatabaseIpc() {
     `).get(datePattern) as any
 
     const diffs: any[] = []
+    let diffId = 1
 
     for (const row of sideBySide) {
       let issues: string[] = []
@@ -948,6 +1064,7 @@ export function registerDatabaseIpc() {
 
       if (issues.length > 0) {
         diffs.push({
+          id: diffId++,
           type: 'mismatch',
           room_id: row.room_id,
           room_no: row.room_no,
@@ -971,6 +1088,7 @@ export function registerDatabaseIpc() {
 
     for (const row of orphanRecords) {
       diffs.push({
+        id: diffId++,
         type: 'orphan',
         room_id: row.room_id,
         room_no: row.room_no,
@@ -1007,12 +1125,18 @@ export function registerDatabaseIpc() {
     const tx = db.transaction((m: string) => {
       const datePattern = m + '%'
 
-      const deleted = db.prepare(`
+      const deleted1 = db.prepare(`
         DELETE FROM consumption_records
         WHERE date LIKE ? AND room_status_id IN (
           SELECT id FROM room_statuses WHERE date LIKE ?
         )
       `).run(datePattern, datePattern)
+
+      const deleted2 = db.prepare(`
+        DELETE FROM consumption_records
+        WHERE date LIKE ? AND room_status_id IS NOT NULL
+          AND room_status_id NOT IN (SELECT id FROM room_statuses)
+      `).run(datePattern)
 
       const allOccupied = db.prepare(`
         SELECT rs.*, r.room_no, r.room_name
@@ -1072,7 +1196,8 @@ export function registerDatabaseIpc() {
       )
 
       return {
-        deleted: deleted.changes || 0,
+        deleted: (deleted1.changes || 0) + (deleted2.changes || 0),
+        deleted_orphans: deleted2.changes || 0,
         generated,
         month: m,
         new_used_quota: actualFromRoomStatus.used_quota || 0,
@@ -1081,6 +1206,188 @@ export function registerDatabaseIpc() {
       }
     })
     return tx(month)
+  })
+
+  // ==================== 单独修复差异 ====================
+  ipcMain.handle('db:fixReconciliationDiff', (_e, params: any) => {
+    const db = getDb()
+    const { month, diffIds } = params
+    const datePattern = month + '%'
+
+    const tx = db.transaction(() => {
+      const sideBySide = db.prepare(`
+        SELECT
+          rs.id as room_status_id,
+          rs.room_id,
+          r.room_no,
+          r.room_name,
+          rs.date,
+          rs.status as rs_status,
+          rs.is_paid as rs_is_paid,
+          rs.quota_used as rs_quota_used,
+          rs.amount as rs_amount,
+          cr.id as cr_id,
+          cr.type as cr_type,
+          cr.quota_used as cr_quota_used,
+          cr.amount as cr_amount
+        FROM room_statuses rs
+        LEFT JOIN rooms r ON rs.room_id = r.id
+        LEFT JOIN consumption_records cr ON rs.id = cr.room_status_id
+        WHERE rs.date LIKE ? AND rs.status != 'available'
+        ORDER BY rs.date ASC, rs.room_id ASC
+      `).all(datePattern) as any[]
+
+      const orphanRecords = db.prepare(`
+        SELECT
+          cr.id as cr_id,
+          cr.room_id,
+          r.room_no,
+          r.room_name,
+          cr.date,
+          cr.type as cr_type,
+          cr.quota_used as cr_quota_used,
+          cr.amount as cr_amount
+        FROM consumption_records cr
+        LEFT JOIN rooms r ON cr.room_id = r.id
+        WHERE cr.date LIKE ? AND cr.room_status_id IS NOT NULL
+          AND cr.room_status_id NOT IN (SELECT id FROM room_statuses)
+        ORDER BY cr.date ASC
+      `).all(datePattern) as any[]
+
+      const allDiffs: any[] = []
+      let diffId = 1
+      for (const row of sideBySide) {
+        let issues: string[] = []
+        if (row.rs_status === 'occupied' && row.rs_is_paid === 0 && row.rs_quota_used > 0) {
+          if (!row.cr_id || row.cr_type !== 'quota' || Math.abs(row.cr_quota_used || 0) !== row.rs_quota_used) {
+            issues.push('免费占用但流水缺失或不匹配')
+          }
+        }
+        if (row.rs_status === 'occupied' && row.rs_is_paid === 1) {
+          if (!row.cr_id || row.cr_type !== 'paid' || Math.abs(row.cr_amount || 0) !== row.rs_amount) {
+            issues.push('自费占用但流水缺失或金额不匹配')
+          }
+        }
+        if (row.rs_status === 'blocked') {
+          if (row.cr_id) {
+            issues.push('锁房状态但存在消费流水')
+          }
+        }
+        if (issues.length > 0) {
+          allDiffs.push({
+            id: diffId++,
+            type: 'mismatch',
+            room_id: row.room_id,
+            room_no: row.room_no,
+            room_name: row.room_name,
+            date: row.date,
+            issues,
+            room_status: { status: row.rs_status, is_paid: row.rs_is_paid, quota_used: row.rs_quota_used, amount: row.rs_amount },
+            consumption: row.cr_id ? { type: row.cr_type, quota_used: row.cr_quota_used, amount: row.cr_amount } : null,
+            raw: row
+          })
+        }
+      }
+      for (const row of orphanRecords) {
+        allDiffs.push({
+          id: diffId++,
+          type: 'orphan',
+          room_id: row.room_id,
+          room_no: row.room_no,
+          room_name: row.room_name,
+          date: row.date,
+          issues: ['消费流水存在但对应房态已删除'],
+          room_status: null,
+          consumption: { type: row.cr_type, quota_used: row.cr_quota_used, amount: row.cr_amount },
+          raw: row
+        })
+      }
+
+      const selectedDiffs = allDiffs.filter(d => diffIds.includes(d.id))
+      let fixed = 0
+      const errors: string[] = []
+      const results: any[] = []
+
+      for (const diff of selectedDiffs) {
+        try {
+          let before = ''
+          let after = ''
+
+          if (diff.type === 'mismatch' && diff.room_status) {
+            before = `房态: ${diff.room_status.status}/${diff.room_status.is_paid ? '自费' : '免费'}, 流水: ${diff.consumption ? diff.consumption.type + ' ¥' + diff.consumption.amount : '无'}`
+
+            if (diff.raw.cr_id) {
+              db.prepare('DELETE FROM consumption_records WHERE id = ?').run(diff.raw.cr_id)
+            }
+
+            if (diff.room_status.status === 'occupied') {
+              if (diff.room_status.is_paid === 1) {
+                addConsumptionRecordInternal(db, {
+                  room_id: diff.room_id,
+                  room_status_id: diff.raw.room_status_id,
+                  date: diff.date,
+                  type: 'paid',
+                  amount: diff.room_status.amount,
+                  quota_used: 0,
+                  description: `对账修复 - ${diff.room_no} - 自费挂房`,
+                  created_by: 'manual_fix'
+                })
+                after = `已生成自费流水 ¥${diff.room_status.amount}`
+              } else {
+                addConsumptionRecordInternal(db, {
+                  room_id: diff.room_id,
+                  room_status_id: diff.raw.room_status_id,
+                  date: diff.date,
+                  type: 'quota',
+                  amount: 0,
+                  quota_used: -(diff.room_status.quota_used || 1),
+                  description: `对账修复 - ${diff.room_no} - 免费额度占用`,
+                  created_by: 'manual_fix'
+                })
+                after = `已生成免费额度流水 ${diff.room_status.quota_used || 1}天`
+              }
+            } else if (diff.room_status.status === 'blocked') {
+              after = '已删除锁房对应的流水'
+            }
+          } else if (diff.type === 'orphan' && diff.consumption) {
+            before = `孤立流水: ${diff.consumption.type} ¥${diff.consumption.amount}`
+            db.prepare('DELETE FROM consumption_records WHERE id = ?').run(diff.raw.cr_id)
+            after = '已删除孤立流水'
+          }
+
+          const monthQuota = getOrCreateMonthlyQuotaInternal(db, month)
+          const actualFromRoomStatus = db.prepare(`
+            SELECT
+              SUM(CASE WHEN is_paid = 0 AND status = 'occupied' THEN quota_used ELSE 0 END) as used_quota,
+              SUM(CASE WHEN is_paid = 1 AND status = 'occupied' THEN 1 ELSE 0 END) as paid_count,
+              SUM(CASE WHEN is_paid = 1 AND status = 'occupied' THEN amount ELSE 0 END) as paid_amount
+            FROM room_statuses
+            WHERE date LIKE ? AND status = 'occupied'
+          `).get(datePattern) as any
+
+          db.prepare(`
+            UPDATE monthly_quotas
+            SET used_quota = ?, paid_count = ?, paid_amount = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE month = ?
+          `).run(
+            actualFromRoomStatus.used_quota || 0,
+            actualFromRoomStatus.paid_count || 0,
+            actualFromRoomStatus.paid_amount || 0,
+            month
+          )
+
+          fixed++
+          results.push({ id: diff.id, before, after, success: true })
+        } catch (e: any) {
+          errors.push(`${diff.room_no} ${diff.date}: ${e.message}`)
+          results.push({ id: diff.id, success: false, error: e.message })
+        }
+      }
+
+      return { fixed, errors, results }
+    })
+
+    return tx()
   })
 
   // ==================== 对账汇总 ====================

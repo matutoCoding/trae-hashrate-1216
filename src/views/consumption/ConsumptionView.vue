@@ -225,13 +225,18 @@
             <div class="reconciliation-title">
               <el-icon color="#f56c6c" :size="20"><Warning /></el-icon>
               <span>三边数据对账：房态记录 ↔ 消费流水 ↔ 额度管控</span>
+              <el-tag v-if="selectedDiffs.length > 0" type="primary" size="small">已选 {{ selectedDiffs.length }} 项</el-tag>
             </div>
             <div class="reconciliation-actions">
               <el-button @click="loadReconciliation">
                 <el-icon><RefreshRight /></el-icon>
                 <span>刷新核对</span>
               </el-button>
-              <el-button type="primary" @click="handleRegenerateRecords">
+              <el-button type="success" @click="handleFixSelected" :disabled="selectedDiffs.length === 0" :loading="fixingLoading">
+                <el-icon><Check /></el-icon>
+                <span>修复选中项</span>
+              </el-button>
+              <el-button type="primary" @click="handleRegenerateRecords" :loading="regeneratingLoading">
                 <el-icon><Refresh /></el-icon>
                 <span>一键重生成当月流水</span>
               </el-button>
@@ -320,17 +325,22 @@
 
           <div class="section-title mb-12">
             <span>差异明细（共 {{ reconciliationResult?.diff_count || 0 }} 处差异）</span>
+            <el-button v-if="selectedDiffs.length > 0" link type="primary" size="small" @click="clearSelection">清空选择</el-button>
           </div>
           <el-table
+            ref="diffTableRef"
             :data="reconciliationResult?.diffs || []"
             border
             stripe
             v-loading="reconciliationLoading"
-            height="420">
+            height="420"
+            @selection-change="handleDiffSelectionChange">
+            <el-table-column type="selection" width="55" />
             <el-table-column type="index" label="序号" width="70" align="center" />
             <el-table-column label="类型" width="100" align="center">
               <template #default="{ row }">
-                <el-tag v-if="row.type === 'mismatch'" type="danger" size="small">不匹配</el-tag>
+                <el-tag v-if="row.fixed" type="success" size="small">已修复</el-tag>
+                <el-tag v-else-if="row.type === 'mismatch'" type="danger" size="small">不匹配</el-tag>
                 <el-tag v-else type="warning" size="small">孤立流水</el-tag>
               </template>
             </el-table-column>
@@ -372,7 +382,7 @@
                 <span v-else style="color:#c0c4cc;">-</span>
               </template>
             </el-table-column>
-            <el-table-column label="差异原因" min-width="200">
+            <el-table-column label="差异原因" min-width="180">
               <template #default="{ row }">
                 <el-tag
                   v-for="(issue, idx) in row.issues"
@@ -382,6 +392,18 @@
                   style="margin-right:4px;">
                   {{ issue }}
                 </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="修复结果" width="240">
+              <template #default="{ row }">
+                <template v-if="row.fixed">
+                  <div class="fix-result">
+                    <div class="fix-before" title="修复前">{{ row.fix_before }}</div>
+                    <el-icon color="#67c23a"><Right /></el-icon>
+                    <div class="fix-after" title="修复后">{{ row.fix_after }}</div>
+                  </div>
+                </template>
+                <span v-else style="color:#c0c4cc;">待处理</span>
               </template>
             </el-table-column>
           </el-table>
@@ -466,7 +488,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { DataLine, Download, Document, Coin, Wallet, Money, FirstAidKit, View, Search, RefreshRight, Warning, Refresh } from '@element-plus/icons-vue'
+import { DataLine, Download, Document, Coin, Wallet, Money, FirstAidKit, View, Search, RefreshRight, Warning, Refresh, Check, Right } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { useRoute } from 'vue-router'
 import type {
@@ -476,6 +498,7 @@ import type {
   ConsumptionRoomRanking,
   Room,
   ReconciliationResult,
+  ReconciliationDiffItem,
   RegenerateResult
 } from '@/types'
 
@@ -493,6 +516,10 @@ const selectedMonth = ref(dayjs().format('YYYY-MM'))
 
 const reconciliationLoading = ref(false)
 const reconciliationResult = ref<ReconciliationResult | null>(null)
+const fixingLoading = ref(false)
+const regeneratingLoading = ref(false)
+const selectedDiffs = ref<ReconciliationDiffItem[]>([])
+const diffTableRef = ref<any>(null)
 
 const dailyDetailVisible = ref(false)
 const roomDailyRecords = ref<ConsumptionRecord[]>([])
@@ -577,6 +604,10 @@ async function loadReconciliation() {
   reconciliationLoading.value = true
   try {
     reconciliationResult.value = await window.dbApi.getReconciliationDiff(selectedMonth.value)
+    selectedDiffs.value = []
+    if (diffTableRef.value) {
+      diffTableRef.value.clearSelection()
+    }
   } catch (e: any) {
     ElMessage.error(e.message || '加载对账数据失败')
   } finally {
@@ -584,19 +615,96 @@ async function loadReconciliation() {
   }
 }
 
+function handleDiffSelectionChange(selection: ReconciliationDiffItem[]) {
+  selectedDiffs.value = selection
+}
+
+function clearSelection() {
+  selectedDiffs.value = []
+  if (diffTableRef.value) {
+    diffTableRef.value.clearSelection()
+  }
+}
+
+async function handleFixSelected() {
+  if (selectedDiffs.value.length === 0) {
+    ElMessage.warning('请先选择要修复的差异项')
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `确定要修复选中的 ${selectedDiffs.value.length} 处差异吗？\n修复后会根据当前房态重新生成消费流水。`,
+      '确认修复',
+      { type: 'warning' }
+    )
+
+    fixingLoading.value = true
+    const diffIds = selectedDiffs.value.map(d => d.id)
+    const result = await window.dbApi.fixReconciliationDiff({
+      month: selectedMonth.value,
+      diffIds
+    })
+
+    if (result.results && reconciliationResult.value) {
+      for (const fixResult of result.results) {
+        const diff = reconciliationResult.value.diffs.find(d => d.id === fixResult.id)
+        if (diff && fixResult.success) {
+          diff.fixed = true
+          diff.fix_before = fixResult.before
+          diff.fix_after = fixResult.after
+        }
+      }
+      reconciliationResult.value.diff_count = reconciliationResult.value.diffs.filter(d => !d.fixed).length
+    }
+
+    if (result.fixed > 0) {
+      ElMessage.success(`成功修复 ${result.fixed} 处差异！`)
+      await Promise.all([
+        loadMonthlySummary(),
+        loadRoomRanking(),
+        loadData()
+      ])
+      window.dispatchEvent(new CustomEvent('quota-updated'))
+    }
+    if (result.errors.length > 0) {
+      ElMessage.error(`修复失败 ${result.errors.length} 处：${result.errors.join('；')}`)
+    }
+
+    clearSelection()
+  } catch (e: any) {
+    if (e !== 'cancel') {
+      ElMessage.error(e.message || '修复失败')
+    }
+  } finally {
+    fixingLoading.value = false
+  }
+}
+
 async function handleRegenerateRecords() {
   try {
-    await ElMessage({
-      type: 'warning',
+    await ElMessageBox.confirm(
+      '确定要重生成当月所有消费流水吗？\n这将删除当月所有关联房态的消费流水（包括孤立流水），然后根据当前房态重新生成。',
+      '确认重生成',
+      { type: 'warning' }
+    )
+
+    regeneratingLoading.value = true
+    ElMessage({
+      type: 'info',
       message: '正在重生成流水，请稍候...',
       duration: 0
     })
 
     const result = await window.dbApi.regenerateConsumptionRecords(selectedMonth.value)
     ElMessage.closeAll()
-    ElMessage.success(
-      `重生成成功！删除旧流水 ${result.deleted} 条，生成新流水 ${result.generated} 条，已自动对齐额度数据。`
-    )
+
+    let msg = `重生成成功！删除旧流水 ${result.deleted} 条`
+    if (result.deleted_orphans > 0) {
+      msg += `（含孤立流水 ${result.deleted_orphans} 条）`
+    }
+    msg += `，生成新流水 ${result.generated} 条。`
+    ElMessage.success(msg)
 
     await loadReconciliation()
     await loadMonthlySummary()
@@ -605,7 +713,11 @@ async function handleRegenerateRecords() {
     window.dispatchEvent(new CustomEvent('quota-updated'))
   } catch (e: any) {
     ElMessage.closeAll()
-    ElMessage.error(e.message || '重生成失败')
+    if (e !== 'cancel') {
+      ElMessage.error(e.message || '重生成失败')
+    }
+  } finally {
+    regeneratingLoading.value = false
   }
 }
 
@@ -933,5 +1045,34 @@ onMounted(async () => {
 .text-danger {
   color: #f56c6c !important;
   font-weight: 600;
+}
+
+.fix-result {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.fix-before {
+  flex: 1;
+  padding: 4px 8px;
+  background: #fef0f0;
+  color: #f56c6c;
+  border-radius: 4px;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.fix-after {
+  flex: 1;
+  padding: 4px 8px;
+  background: #f0f9eb;
+  color: #67c23a;
+  border-radius: 4px;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
 }
 </style>

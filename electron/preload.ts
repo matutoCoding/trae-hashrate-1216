@@ -29,8 +29,10 @@ contextBridge.exposeInMainWorld('dbApi', {
   // 经营看板
   getDashboardStats: (params: any) => ipcRenderer.invoke('db:getDashboardStats', params),
   getDashboardByRoom: (params: any) => ipcRenderer.invoke('db:getDashboardByRoom', params),
+  getDashboardTrend: (params: any) => ipcRenderer.invoke('db:getDashboardTrend', params),
   getRoomTypes: () => ipcRenderer.invoke('db:getRoomTypes'),
   getFloors: () => ipcRenderer.invoke('db:getFloors'),
+  getBatchOperationLogs: () => ipcRenderer.invoke('db:getBatchOperationLogs'),
 
   // 额度
   getQuotaConfig: () => ipcRenderer.invoke('db:getQuotaConfig'),
@@ -52,6 +54,7 @@ contextBridge.exposeInMainWorld('dbApi', {
   getRoomDailyConsumption: (params: any) => ipcRenderer.invoke('db:getRoomDailyConsumption', params),
   getReconciliationDiff: (month: string) => ipcRenderer.invoke('db:getReconciliationDiff', month),
   regenerateConsumptionRecords: (month: string) => ipcRenderer.invoke('db:regenerateConsumptionRecords', month),
+  fixReconciliationDiff: (params: any) => ipcRenderer.invoke('db:fixReconciliationDiff', params),
 
   // 保洁
   getCleaningTasks: (params: any) => ipcRenderer.invoke('db:getCleaningTasks', params),

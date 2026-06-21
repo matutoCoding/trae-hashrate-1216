@@ -129,17 +129,34 @@ export interface BatchOperationLog {
   end_date: string
   affected_count: number
   snapshot: string
+  parent_id?: number
+  is_revert?: number
   created_at: string
 }
 
 export interface BatchOperationSnapshotItem {
   id: number
   room_id: number
+  room_no?: string
+  room_name?: string
   date: string
   status: RoomStatusType
   is_paid: number
   amount: number
   quota_used: number
+  new_status?: RoomStatusType
+  new_is_paid?: number
+  new_amount?: number
+}
+
+export interface DashboardTrendItem {
+  month: string
+  occupied_days: number
+  quota_used: number
+  paid_amount: number
+  occupancy_rate: number
+  total_rooms: number
+  days_in_month: number
 }
 
 export interface DashboardStats {
@@ -168,6 +185,7 @@ export interface RoomStat {
 }
 
 export interface ReconciliationDiffItem {
+  id: number
   type: 'mismatch' | 'orphan'
   room_id: number
   room_no: string
@@ -185,6 +203,9 @@ export interface ReconciliationDiffItem {
     quota_used: number
     amount: number
   } | null
+  fixed?: boolean
+  fix_before?: string
+  fix_after?: string
 }
 
 export interface ReconciliationResult {
@@ -200,6 +221,7 @@ export interface ReconciliationResult {
 
 export interface RegenerateResult {
   deleted: number
+  deleted_orphans: number
   generated: number
   month: string
   new_used_quota: number
@@ -263,6 +285,8 @@ declare global {
       getFloors(): Promise<number[]>
       getDashboardStats(params?: { month?: string; roomType?: string; floor?: number }): Promise<DashboardStats>
       getDashboardByRoom(params?: { month?: string; roomType?: string; floor?: number }): Promise<RoomStat[]>
+      getDashboardTrend(params?: { roomType?: string; floor?: number }): Promise<DashboardTrendItem[]>
+      getBatchOperationLogs(): Promise<BatchOperationLog[]>
 
       // 额度
       getQuotaConfig(): Promise<QuotaConfig>
@@ -283,6 +307,7 @@ declare global {
       getRoomDailyConsumption(params: { roomId: number; month: string }): Promise<ConsumptionRecord[]>
       getReconciliationDiff(month: string): Promise<ReconciliationResult>
       regenerateConsumptionRecords(month: string): Promise<RegenerateResult>
+      fixReconciliationDiff(params: { month: string; diffIds: number[] }): Promise<{ fixed: number; errors: string[]; results: Array<{ id: number; before?: string; after?: string; success: boolean; error?: string }> }>
 
       getCleaningTasks(params?: any): Promise<CleaningTask[]>
       addCleaningTask(task: Partial<CleaningTask>): Promise<{ id: number }>
