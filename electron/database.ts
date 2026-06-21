@@ -128,6 +128,21 @@ function createTables() {
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS batch_operation_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      operation_type TEXT NOT NULL,
+      operator TEXT DEFAULT 'system',
+      target_status TEXT,
+      target_is_paid INTEGER DEFAULT 0,
+      target_amount REAL DEFAULT 0,
+      room_ids TEXT NOT NULL,
+      start_date TEXT NOT NULL,
+      end_date TEXT NOT NULL,
+      affected_count INTEGER NOT NULL DEFAULT 0,
+      snapshot TEXT NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
   `)
 }
 

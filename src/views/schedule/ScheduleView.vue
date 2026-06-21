@@ -23,6 +23,14 @@
           <el-icon><Grid /></el-icon>
           <span>批量调整</span>
         </el-button>
+        <el-button :disabled="!hasLastBatch" @click="handleRevertLastBatch" style="margin-right: 12px;">
+          <el-icon><RefreshLeft /></el-icon>
+          <span>撤销上次批量</span>
+        </el-button>
+        <el-button @click="openBatchLogDialog()" style="margin-right: 12px;">
+          <el-icon><Document /></el-icon>
+          <span>操作记录</span>
+        </el-button>
         <el-button type="primary" @click="openStatusDialog()">
           <el-icon><Plus /></el-icon>
           <span>添加房态</span>
@@ -237,15 +245,85 @@
         <el-button type="primary" @click="handleBatchSubmit">确认调整</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="batchLogDialogVisible" title="批量操作记录" width="800px">
+      <div v-if="lastBatchLog" class="batch-log-detail">
+        <el-descriptions :column="2" border size="small">
+          <el-descriptions-item label="操作时间">
+            {{ formatDateTime(lastBatchLog.created_at) }}
+          </el-descriptions-item>
+          <el-descriptions-item label="操作类型">
+            <el-tag type="primary">批量调整</el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="操作人">
+            {{ lastBatchLog.operator === 'manual' ? '手动操作' : lastBatchLog.operator }}
+          </el-descriptions-item>
+          <el-descriptions-item label="影响记录数">
+            <span style="color:#409eff;font-weight:600;">{{ lastBatchLog.affected_count }}</span> 条
+          </el-descriptions-item>
+          <el-descriptions-item label="日期范围">
+            {{ lastBatchLog.start_date }} ~ {{ lastBatchLog.end_date }}
+          </el-descriptions-item>
+          <el-descriptions-item label="调整目标">
+            <span v-if="lastBatchLog.target_status === 'blocked'" style="color:#909399;">🔒 锁房</span>
+            <span v-else-if="lastBatchLog.target_is_paid === 1" style="color:#f56c6c;">💰 自费占用 ¥{{ lastBatchLog.target_amount }}/天</span>
+            <span v-else style="color:#67c23a;">🎁 免费占用</span>
+          </el-descriptions-item>
+        </el-descriptions>
+
+        <div style="margin-top:16px;">
+          <div style="margin-bottom:8px;color:#606266;font-weight:500;">变更明细（共 {{ batchSnapshot.length }} 条）</div>
+          <el-table :data="batchSnapshot" border stripe height="360">
+            <el-table-column prop="room_id" label="房间ID" width="80" align="center" />
+            <el-table-column prop="date" label="日期" width="130" />
+            <el-table-column label="原状态" width="120" align="center">
+              <template #default="{ row }">
+                <el-tag v-if="row.status === 'blocked'" type="info" size="small">锁房</el-tag>
+                <el-tag v-else-if="row.is_paid === 1" type="danger" size="small">自费</el-tag>
+                <el-tag v-else type="success" size="small">免费</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="原金额(元)" width="110" align="right">
+              <template #default="{ row }">
+                <span v-if="row.is_paid === 1">¥{{ row.amount.toFixed(2) }}</span>
+                <span v-else style="color:#c0c4cc;">-</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="原额度使用" width="100" align="center">
+              <template #default="{ row }">
+                <span v-if="row.quota_used > 0" style="color:#67c23a;">{{ row.quota_used }} 天</span>
+                <span v-else style="color:#c0c4cc;">-</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="新状态" width="120" align="center">
+              <template #default>
+                <el-tag v-if="lastBatchLog.target_status === 'blocked'" type="info" size="small">锁房</el-tag>
+                <el-tag v-else-if="lastBatchLog.target_is_paid === 1" type="danger" size="small">自费</el-tag>
+                <el-tag v-else type="success" size="small">免费</el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+
+        <div style="margin-top:16px;text-align:right;">
+          <el-button type="warning" @click="handleRevertLastBatch">
+            <el-icon><RefreshLeft /></el-icon>
+            <span>撤销此操作</span>
+          </el-button>
+          <el-button type="primary" @click="batchLogDialogVisible = false">关闭</el-button>
+        </div>
+      </div>
+      <el-empty v-else description="暂无批量操作记录" />
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, watch, reactive } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance } from 'element-plus'
-import { Calendar, Plus, Grid } from '@element-plus/icons-vue'
+import { Calendar, Plus, Grid, RefreshLeft, Document } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
-import type { Room, RoomStatus, RoomStatusType } from '@/types'
+import type { Room, RoomStatus, RoomStatusType, BatchOperationLog, BatchOperationSnapshotItem } from '@/types'
 
 const loading = ref(false)
 const viewMode = ref<'month' | 'week'>('month')
@@ -278,6 +356,12 @@ const batchForm = reactive({
   targetStatus: 'blocked' as 'blocked' | 'occupied-free' | 'occupied-paid',
   amount: 100
 })
+
+const batchLogDialogVisible = ref(false)
+const lastBatchLog = ref<BatchOperationLog | null>(null)
+const batchSnapshot = ref<BatchOperationSnapshotItem[]>([])
+
+const hasLastBatch = computed(() => !!lastBatchLog.value)
 
 const dialogTitle = computed(() => editingId.value ? '编辑房态' : '添加房态')
 
@@ -534,15 +618,71 @@ async function handleBatchSubmit() {
     ElMessage.success(`批量调整完成，共更新 ${result.updated} 条记录`)
     batchDialogVisible.value = false
     await loadData()
+    await loadLastBatchOperation()
     window.dispatchEvent(new CustomEvent('quota-updated'))
   } catch (e: any) {
     ElMessage.error(e.message || '批量调整失败')
   }
 }
 
+async function loadLastBatchOperation() {
+  try {
+    lastBatchLog.value = (await window.dbApi.getLastBatchOperation()) || null
+    if (lastBatchLog.value?.snapshot) {
+      batchSnapshot.value = JSON.parse(lastBatchLog.value.snapshot)
+    } else {
+      batchSnapshot.value = []
+    }
+  } catch (e) {
+    lastBatchLog.value = null
+    batchSnapshot.value = []
+  }
+}
+
+function openBatchLogDialog() {
+  loadLastBatchOperation()
+  batchLogDialogVisible.value = true
+}
+
+async function handleRevertLastBatch() {
+  if (!lastBatchLog.value) {
+    ElMessage.warning('没有可撤销的批量操作')
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `确认要撤销 ${formatDateTime(lastBatchLog.value.created_at)} 的批量操作吗？\n共 ${lastBatchLog.value.affected_count} 条记录将恢复到调整前的状态。`,
+      '撤销确认',
+      { type: 'warning', confirmButtonText: '确认撤销', cancelButtonText: '取消' }
+    )
+
+    const result = await window.dbApi.revertLastBatchOperation()
+    if (result.success) {
+      ElMessage.success(`撤销成功，共恢复 ${result.reverted} 条记录`)
+      batchLogDialogVisible.value = false
+      await loadData()
+      await loadLastBatchOperation()
+      window.dispatchEvent(new CustomEvent('quota-updated'))
+    } else {
+      ElMessage.error(result.message || '撤销失败')
+    }
+  } catch (e) {
+    // 用户取消
+  }
+}
+
+function formatDateTime(dt: string) {
+  if (!dt) return '-'
+  return dayjs(dt).format('YYYY-MM-DD HH:mm:ss')
+}
+
 watch(viewMode, loadData)
 
-onMounted(loadData)
+onMounted(async () => {
+  await loadData()
+  await loadLastBatchOperation()
+})
 </script>
 
 <style lang="scss" scoped>

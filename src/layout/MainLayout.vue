@@ -13,6 +13,10 @@
         text-color="#fff"
         active-text-color="#409eff"
       >
+        <el-menu-item index="/dashboard">
+          <el-icon><DataLine /></el-icon>
+          <span>经营看板</span>
+        </el-menu-item>
         <el-menu-item index="/schedule">
           <el-icon><Calendar /></el-icon>
           <span>房态排期</span>
@@ -71,6 +75,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { House, Calendar, Refresh, Coin, Tickets, Brush, RefreshLeft, DataLine } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import type { MonthlyQuota, QuotaConfig } from '@/types'
 

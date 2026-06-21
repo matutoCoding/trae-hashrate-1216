@@ -22,7 +22,15 @@ contextBridge.exposeInMainWorld('dbApi', {
   deleteRoomStatus: (id: number) => ipcRenderer.invoke('db:deleteRoomStatus', id),
   batchGenerateRoomStatuses: (params: any) => ipcRenderer.invoke('db:batchGenerateRoomStatuses', params),
   batchUpdateRoomStatuses: (params: any) => ipcRenderer.invoke('db:batchUpdateRoomStatuses', params),
+  getLastBatchOperation: () => ipcRenderer.invoke('db:getLastBatchOperation'),
+  revertLastBatchOperation: () => ipcRenderer.invoke('db:revertLastBatchOperation'),
   getStatusByRoomAndDate: (roomId: number, date: string) => ipcRenderer.invoke('db:getStatusByRoomAndDate', roomId, date),
+
+  // 经营看板
+  getDashboardStats: (params: any) => ipcRenderer.invoke('db:getDashboardStats', params),
+  getDashboardByRoom: (params: any) => ipcRenderer.invoke('db:getDashboardByRoom', params),
+  getRoomTypes: () => ipcRenderer.invoke('db:getRoomTypes'),
+  getFloors: () => ipcRenderer.invoke('db:getFloors'),
 
   // 额度
   getQuotaConfig: () => ipcRenderer.invoke('db:getQuotaConfig'),
@@ -42,6 +50,8 @@ contextBridge.exposeInMainWorld('dbApi', {
   getConsumptionMonthlySummary: (month: string) => ipcRenderer.invoke('db:getConsumptionMonthlySummary', month),
   getConsumptionRoomRanking: (month: string) => ipcRenderer.invoke('db:getConsumptionRoomRanking', month),
   getRoomDailyConsumption: (params: any) => ipcRenderer.invoke('db:getRoomDailyConsumption', params),
+  getReconciliationDiff: (month: string) => ipcRenderer.invoke('db:getReconciliationDiff', month),
+  regenerateConsumptionRecords: (month: string) => ipcRenderer.invoke('db:regenerateConsumptionRecords', month),
 
   // 保洁
   getCleaningTasks: (params: any) => ipcRenderer.invoke('db:getCleaningTasks', params),

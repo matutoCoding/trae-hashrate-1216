@@ -218,6 +218,175 @@
           </div>
         </div>
       </el-tab-pane>
+
+      <el-tab-pane label="差异核对" name="reconciliation">
+        <div class="stat-card">
+          <div class="reconciliation-header mb-16">
+            <div class="reconciliation-title">
+              <el-icon color="#f56c6c" :size="20"><Warning /></el-icon>
+              <span>三边数据对账：房态记录 ↔ 消费流水 ↔ 额度管控</span>
+            </div>
+            <div class="reconciliation-actions">
+              <el-button @click="loadReconciliation">
+                <el-icon><RefreshRight /></el-icon>
+                <span>刷新核对</span>
+              </el-button>
+              <el-button type="primary" @click="handleRegenerateRecords">
+                <el-icon><Refresh /></el-icon>
+                <span>一键重生成当月流水</span>
+              </el-button>
+            </div>
+          </div>
+
+          <el-descriptions v-if="reconciliationResult" :column="3" border size="small" class="mb-20">
+            <el-descriptions-item label="数据来源" align="center">
+              <span style="font-weight:600;">额度管控</span>
+            </el-descriptions-item>
+            <el-descriptions-item label="数据来源" align="center">
+              <span style="font-weight:600;">房态记录</span>
+            </el-descriptions-item>
+            <el-descriptions-item label="数据来源" align="center">
+              <span style="font-weight:600;">消费流水</span>
+            </el-descriptions-item>
+            <el-descriptions-item label="已用额度(天)" align="center">
+              <span :class="{ 'text-danger': reconciliationResult.quota_summary.has_diff }">
+                {{ reconciliationResult.quota_summary.from_monthly_quotas.used_quota }}
+              </span>
+            </el-descriptions-item>
+            <el-descriptions-item label="已用额度(天)" align="center">
+              <span :class="{ 'text-danger': reconciliationResult.quota_summary.has_diff }">
+                {{ reconciliationResult.quota_summary.from_room_statuses.used_quota }}
+              </span>
+            </el-descriptions-item>
+            <el-descriptions-item label="已用额度(天)" align="center">
+              <span :class="{ 'text-danger': reconciliationResult.quota_summary.has_diff }">
+                {{ reconciliationResult.quota_summary.from_consumption_records.used_quota }}
+              </span>
+            </el-descriptions-item>
+            <el-descriptions-item label="自费天数" align="center">
+              <span :class="{ 'text-danger': reconciliationResult.quota_summary.has_diff }">
+                {{ reconciliationResult.quota_summary.from_monthly_quotas.paid_count }}
+              </span>
+            </el-descriptions-item>
+            <el-descriptions-item label="自费天数" align="center">
+              <span :class="{ 'text-danger': reconciliationResult.quota_summary.has_diff }">
+                {{ reconciliationResult.quota_summary.from_room_statuses.paid_count }}
+              </span>
+            </el-descriptions-item>
+            <el-descriptions-item label="自费天数" align="center">
+              <span :class="{ 'text-danger': reconciliationResult.quota_summary.has_diff }">
+                {{ reconciliationResult.quota_summary.from_consumption_records.paid_count }}
+              </span>
+            </el-descriptions-item>
+            <el-descriptions-item label="自费总额(元)" align="center">
+              <span :class="{ 'text-danger': reconciliationResult.quota_summary.has_diff }">
+                ¥{{ reconciliationResult.quota_summary.from_monthly_quotas.paid_amount.toFixed(2) }}
+              </span>
+            </el-descriptions-item>
+            <el-descriptions-item label="自费总额(元)" align="center">
+              <span :class="{ 'text-danger': reconciliationResult.quota_summary.has_diff }">
+                ¥{{ reconciliationResult.quota_summary.from_room_statuses.paid_amount.toFixed(2) }}
+              </span>
+            </el-descriptions-item>
+            <el-descriptions-item label="自费总额(元)" align="center">
+              <span :class="{ 'text-danger': reconciliationResult.quota_summary.has_diff }">
+                ¥{{ reconciliationResult.quota_summary.from_consumption_records.paid_amount.toFixed(2) }}
+              </span>
+            </el-descriptions-item>
+          </el-descriptions>
+
+          <el-alert
+            v-if="reconciliationResult?.quota_summary?.has_diff"
+            type="warning"
+            show-icon
+            :closable="false"
+            class="mb-20"
+            title="数据不一致">
+            <template #default>
+              三边数据存在差异，建议点击「一键重生成当月流水」以消费流水为准重新对齐，或点击「额度校准」以房态为准重新对齐。
+            </template>
+          </el-alert>
+          <el-alert
+            v-else-if="reconciliationResult"
+            type="success"
+            show-icon
+            :closable="false"
+            class="mb-20"
+            title="数据一致 ✅">
+            <template #default>
+              房态记录、消费流水、额度管控三边数据完全一致，当前对账通过。
+            </template>
+          </el-alert>
+
+          <div class="section-title mb-12">
+            <span>差异明细（共 {{ reconciliationResult?.diff_count || 0 }} 处差异）</span>
+          </div>
+          <el-table
+            :data="reconciliationResult?.diffs || []"
+            border
+            stripe
+            v-loading="reconciliationLoading"
+            height="420">
+            <el-table-column type="index" label="序号" width="70" align="center" />
+            <el-table-column label="类型" width="100" align="center">
+              <template #default="{ row }">
+                <el-tag v-if="row.type === 'mismatch'" type="danger" size="small">不匹配</el-tag>
+                <el-tag v-else type="warning" size="small">孤立流水</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="date" label="日期" width="130" />
+            <el-table-column prop="room_no" label="房间号" width="100" />
+            <el-table-column prop="room_name" label="房间名称" width="140" show-overflow-tooltip />
+            <el-table-column label="房态状态" width="120" align="center">
+              <template #default="{ row }">
+                <template v-if="row.room_status">
+                  <el-tag v-if="row.room_status.status === 'blocked'" type="info" size="small">锁房</el-tag>
+                  <el-tag v-else-if="row.room_status.is_paid === 1" type="danger" size="small">自费</el-tag>
+                  <el-tag v-else type="success" size="small">免费</el-tag>
+                </template>
+                <span v-else style="color:#c0c4cc;">已删除</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="房态金额" width="110" align="right">
+              <template #default="{ row }">
+                <template v-if="row.room_status?.is_paid === 1">
+                  ¥{{ row.room_status.amount.toFixed(2) }}
+                </template>
+                <span v-else style="color:#c0c4cc;">-</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="流水类型" width="100" align="center">
+              <template #default="{ row }">
+                <template v-if="row.consumption">
+                  <el-tag v-if="row.consumption.type === 'paid'" type="danger" size="small">自费</el-tag>
+                  <el-tag v-else type="success" size="small">额度</el-tag>
+                </template>
+                <span v-else style="color:#c0c4cc;">缺失</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="流水金额" width="110" align="right">
+              <template #default="{ row }">
+                <template v-if="row.consumption?.type === 'paid'">
+                  ¥{{ row.consumption.amount.toFixed(2) }}
+                </template>
+                <span v-else style="color:#c0c4cc;">-</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="差异原因" min-width="200">
+              <template #default="{ row }">
+                <el-tag
+                  v-for="(issue, idx) in row.issues"
+                  :key="idx"
+                  type="warning"
+                  size="small"
+                  style="margin-right:4px;">
+                  {{ issue }}
+                </el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+      </el-tab-pane>
     </el-tabs>
 
     <el-dialog v-model="dailyDetailVisible" :title="dailyDetailTitle" width="900px" :close-on-click-modal="false">
@@ -296,16 +465,21 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
-import { Tickets, Download, Document, Coin, Wallet, Money, FirstAidKit, View, Search, RefreshRight } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { DataLine, Download, Document, Coin, Wallet, Money, FirstAidKit, View, Search, RefreshRight, Warning, Refresh } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
+import { useRoute } from 'vue-router'
 import type {
   ConsumptionRecord,
   ConsumptionSummary,
   ConsumptionMonthlySummary,
   ConsumptionRoomRanking,
-  Room
+  Room,
+  ReconciliationResult,
+  RegenerateResult
 } from '@/types'
+
+const route = useRoute()
 
 const loading = ref(false)
 const dailyLoading = ref(false)
@@ -314,8 +488,11 @@ const records = ref<ConsumptionRecord[]>([])
 const summary = ref<ConsumptionSummary | null>(null)
 const monthlySummary = ref<ConsumptionMonthlySummary | null>(null)
 const roomRanking = ref<ConsumptionRoomRanking[]>([])
-const activeTab = ref<'ranking' | 'detail'>('ranking')
+const activeTab = ref<'ranking' | 'detail' | 'reconciliation'>('ranking')
 const selectedMonth = ref(dayjs().format('YYYY-MM'))
+
+const reconciliationLoading = ref(false)
+const reconciliationResult = ref<ReconciliationResult | null>(null)
 
 const dailyDetailVisible = ref(false)
 const roomDailyRecords = ref<ConsumptionRecord[]>([])
@@ -366,7 +543,8 @@ async function loadData() {
   try {
     const params: any = {
       limit: 1000,
-      offset: 0
+      offset: 0,
+      month: selectedMonth.value
     }
     if (filterForm.dateRange && filterForm.dateRange.length === 2) {
       params.startDate = filterForm.dateRange[0]
@@ -380,7 +558,7 @@ async function loadData() {
     }
 
     records.value = await window.dbApi.getConsumptionRecords(params)
-    summary.value = await window.dbApi.getConsumptionSummary(params)
+    summary.value = await window.dbApi.getConsumptionSummary({ ...params })
   } finally {
     loading.value = false
   }
@@ -390,6 +568,45 @@ function handleMonthChange() {
   loadMonthlySummary()
   loadRoomRanking()
   loadData()
+  if (activeTab.value === 'reconciliation') {
+    loadReconciliation()
+  }
+}
+
+async function loadReconciliation() {
+  reconciliationLoading.value = true
+  try {
+    reconciliationResult.value = await window.dbApi.getReconciliationDiff(selectedMonth.value)
+  } catch (e: any) {
+    ElMessage.error(e.message || '加载对账数据失败')
+  } finally {
+    reconciliationLoading.value = false
+  }
+}
+
+async function handleRegenerateRecords() {
+  try {
+    await ElMessage({
+      type: 'warning',
+      message: '正在重生成流水，请稍候...',
+      duration: 0
+    })
+
+    const result = await window.dbApi.regenerateConsumptionRecords(selectedMonth.value)
+    ElMessage.closeAll()
+    ElMessage.success(
+      `重生成成功！删除旧流水 ${result.deleted} 条，生成新流水 ${result.generated} 条，已自动对齐额度数据。`
+    )
+
+    await loadReconciliation()
+    await loadMonthlySummary()
+    await loadRoomRanking()
+    await loadData()
+    window.dispatchEvent(new CustomEvent('quota-updated'))
+  } catch (e: any) {
+    ElMessage.closeAll()
+    ElMessage.error(e.message || '重生成失败')
+  }
 }
 
 function handleSearch() {
@@ -534,10 +751,34 @@ function exportDetail() {
 }
 
 onMounted(async () => {
+  if (route.query.month && typeof route.query.month === 'string') {
+    selectedMonth.value = route.query.month
+  }
+  if (route.query.tab === 'detail') {
+    activeTab.value = 'detail'
+  }
+  if (route.query.roomId) {
+    const roomId = Number(route.query.roomId)
+    if (!isNaN(roomId)) {
+      filterForm.roomId = roomId
+    }
+  }
+
   await loadRooms()
   await loadMonthlySummary()
   await loadRoomRanking()
   await loadData()
+  if (activeTab.value === 'reconciliation') {
+    await loadReconciliation()
+  }
+
+  if (route.query.roomId) {
+    const roomId = Number(route.query.roomId)
+    const room = roomRanking.value.find(r => r.room_id === roomId)
+    if (room) {
+      setTimeout(() => openRoomDailyDetail(room), 300)
+    }
+  }
 })
 </script>
 
@@ -661,5 +902,36 @@ onMounted(async () => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+.reconciliation-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.reconciliation-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.reconciliation-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.section-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #606266;
+}
+
+.text-danger {
+  color: #f56c6c !important;
+  font-weight: 600;
 }
 </style>

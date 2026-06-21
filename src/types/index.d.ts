@@ -117,6 +117,96 @@ export interface CalibrateResult {
   total_quota: number
 }
 
+export interface BatchOperationLog {
+  id: number
+  operation_type: string
+  operator: string
+  target_status: string
+  target_is_paid: number
+  target_amount: number
+  room_ids: string
+  start_date: string
+  end_date: string
+  affected_count: number
+  snapshot: string
+  created_at: string
+}
+
+export interface BatchOperationSnapshotItem {
+  id: number
+  room_id: number
+  date: string
+  status: RoomStatusType
+  is_paid: number
+  amount: number
+  quota_used: number
+}
+
+export interface DashboardStats {
+  occupied_days: number
+  quota_used: number
+  paid_amount: number
+  paid_days: number
+  blocked_days: number
+  active_rooms: number
+  total_rooms: number
+  total_available_days: number
+  occupancy_rate: number
+}
+
+export interface RoomStat {
+  room_id: number
+  room_no: string
+  room_name: string
+  room_type: string
+  floor: number
+  occupied_days: number
+  quota_used: number
+  paid_amount: number
+  paid_days: number
+  blocked_days: number
+}
+
+export interface ReconciliationDiffItem {
+  type: 'mismatch' | 'orphan'
+  room_id: number
+  room_no: string
+  room_name: string
+  date: string
+  issues: string[]
+  room_status: {
+    status: string
+    is_paid: number
+    quota_used: number
+    amount: number
+  } | null
+  consumption: {
+    type: string
+    quota_used: number
+    amount: number
+  } | null
+}
+
+export interface ReconciliationResult {
+  diffs: ReconciliationDiffItem[]
+  diff_count: number
+  quota_summary: {
+    from_monthly_quotas: { used_quota: number; paid_count: number; paid_amount: number; total_quota: number }
+    from_room_statuses: { used_quota: number; paid_count: number; paid_amount: number }
+    from_consumption_records: { used_quota: number; paid_count: number; paid_amount: number }
+    has_diff: boolean
+  }
+}
+
+export interface RegenerateResult {
+  deleted: number
+  generated: number
+  month: string
+  new_used_quota: number
+  new_paid_count: number
+  new_paid_amount: number
+}
+
 export type CleaningStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled'
 
 export interface CleaningTask {
@@ -164,8 +254,17 @@ declare global {
       deleteRoomStatus(id: number): Promise<boolean>
       batchGenerateRoomStatuses(params: any): Promise<{ count: number; quotaOverflow: number; quotaOverflowDetails: any[] }>
       batchUpdateRoomStatuses(params: { roomIds: number[]; startDate: string; endDate: string; status: RoomStatusType; is_paid: number; amount?: number }): Promise<{ updated: number }>
+      getLastBatchOperation(): Promise<BatchOperationLog | undefined>
+      revertLastBatchOperation(): Promise<{ success: boolean; reverted?: number; message?: string }>
       getStatusByRoomAndDate(roomId: number, date: string): Promise<RoomStatus | undefined>
 
+      // 经营看板
+      getRoomTypes(): Promise<string[]>
+      getFloors(): Promise<number[]>
+      getDashboardStats(params?: { month?: string; roomType?: string; floor?: number }): Promise<DashboardStats>
+      getDashboardByRoom(params?: { month?: string; roomType?: string; floor?: number }): Promise<RoomStat[]>
+
+      // 额度
       getQuotaConfig(): Promise<QuotaConfig>
       updateQuotaConfig(config: Partial<QuotaConfig>): Promise<boolean>
       getMonthlyQuota(month: string): Promise<MonthlyQuota>
@@ -182,6 +281,8 @@ declare global {
       getConsumptionMonthlySummary(month: string): Promise<ConsumptionMonthlySummary>
       getConsumptionRoomRanking(month: string): Promise<ConsumptionRoomRanking[]>
       getRoomDailyConsumption(params: { roomId: number; month: string }): Promise<ConsumptionRecord[]>
+      getReconciliationDiff(month: string): Promise<ReconciliationResult>
+      regenerateConsumptionRecords(month: string): Promise<RegenerateResult>
 
       getCleaningTasks(params?: any): Promise<CleaningTask[]>
       addCleaningTask(task: Partial<CleaningTask>): Promise<{ id: number }>

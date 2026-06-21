@@ -378,10 +378,14 @@ export function registerDatabaseIpc() {
       SELECT cr.*, r.room_no, r.room_name
       FROM consumption_records cr
       LEFT JOIN rooms r ON cr.room_id = r.id
-      WHERE 1=1
+      WHERE cr.room_id > 0
     `
     const args: any[] = []
 
+    if (params?.month) {
+      sql += ' AND cr.date LIKE ?'
+      args.push(params.month + '%')
+    }
     if (params?.startDate) {
       sql += ' AND cr.date >= ?'
       args.push(params.startDate)
@@ -400,7 +404,7 @@ export function registerDatabaseIpc() {
     }
 
     sql += ' ORDER BY cr.created_at DESC LIMIT ? OFFSET ?'
-    args.push(params?.limit || 100, params?.offset || 0)
+    args.push(params?.limit || 1000, params?.offset || 0)
 
     return db.prepare(sql).all(...args)
   })
@@ -601,8 +605,21 @@ export function registerDatabaseIpc() {
       const dateStart = dayjs(startDate)
       const dateEnd = dayjs(endDate)
       const days = dateEnd.diff(dateStart, 'day') + 1
-      let updated = 0
 
+      const snapshot: any[] = []
+      for (const roomId of roomIds) {
+        for (let i = 0; i < days; i++) {
+          const date = dateStart.add(i, 'day').format('YYYY-MM-DD')
+          const existing = db.prepare(
+            'SELECT id, room_id, date, status, is_paid, amount, quota_used FROM room_statuses WHERE room_id = ? AND date = ?'
+          ).get(roomId, date) as any
+          if (existing) {
+            snapshot.push({ ...existing })
+          }
+        }
+      }
+
+      let updated = 0
       for (const roomId of roomIds) {
         for (let i = 0; i < days; i++) {
           const date = dateStart.add(i, 'day').format('YYYY-MM-DD')
@@ -623,9 +640,73 @@ export function registerDatabaseIpc() {
         }
       }
 
+      if (updated > 0 && snapshot.length > 0) {
+        db.prepare(`
+          INSERT INTO batch_operation_logs (
+            operation_type, operator, target_status, target_is_paid, target_amount,
+            room_ids, start_date, end_date, affected_count, snapshot
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          'batch_update',
+          'manual',
+          status,
+          is_paid,
+          amount || paidPrice,
+          JSON.stringify(roomIds),
+          startDate,
+          endDate,
+          updated,
+          JSON.stringify(snapshot)
+        )
+      }
+
       return { updated }
     })
     return tx(params)
+  })
+
+  // ==================== 批量操作日志 ====================
+  ipcMain.handle('db:getLastBatchOperation', () => {
+    const db = getDb()
+    return db.prepare(`
+      SELECT * FROM batch_operation_logs
+      ORDER BY id DESC LIMIT 1
+    `).get()
+  })
+
+  ipcMain.handle('db:revertLastBatchOperation', () => {
+    const db = getDb()
+    const tx = db.transaction(() => {
+      const lastLog = db.prepare(`
+        SELECT * FROM batch_operation_logs
+        ORDER BY id DESC LIMIT 1
+      `).get() as any
+
+      if (!lastLog) {
+        return { success: false, message: '没有可撤销的批量操作' }
+      }
+
+      const snapshot = JSON.parse(lastLog.snapshot)
+      let reverted = 0
+
+      for (const old of snapshot) {
+        saveRoomStatusTransaction(db, {
+          id: old.id,
+          room_id: old.room_id,
+          date: old.date,
+          status: old.status,
+          is_paid: old.is_paid,
+          amount: old.amount,
+          source: 'revert'
+        })
+        reverted++
+      }
+
+      db.prepare('DELETE FROM batch_operation_logs WHERE id = ?').run(lastLog.id)
+
+      return { success: true, reverted }
+    })
+    return tx()
   })
 
   // ==================== 额度校准 ====================
@@ -667,17 +748,352 @@ export function registerDatabaseIpc() {
     return tx(month)
   })
 
+  // ==================== 经营看板 ====================
+  ipcMain.handle('db:getDashboardStats', (_e, params: any) => {
+    const db = getDb()
+    const { month, roomType, floor } = params || {}
+
+    let roomFilter = ''
+    const roomArgs: any[] = []
+
+    if (roomType) {
+      roomFilter += ' AND r.room_type = ?'
+      roomArgs.push(roomType)
+    }
+    if (floor) {
+      roomFilter += ' AND r.floor = ?'
+      roomArgs.push(floor)
+    }
+
+    const datePattern = month ? month + '%' : '%'
+
+    const stats = db.prepare(`
+      SELECT
+        SUM(CASE WHEN rs.status = 'occupied' THEN 1 ELSE 0 END) as occupied_days,
+        SUM(CASE WHEN rs.status = 'occupied' AND rs.is_paid = 0 THEN rs.quota_used ELSE 0 END) as quota_used,
+        SUM(CASE WHEN rs.status = 'occupied' AND rs.is_paid = 1 THEN rs.amount ELSE 0 END) as paid_amount,
+        SUM(CASE WHEN rs.status = 'occupied' AND rs.is_paid = 1 THEN 1 ELSE 0 END) as paid_days,
+        SUM(CASE WHEN rs.status = 'blocked' THEN 1 ELSE 0 END) as blocked_days,
+        COUNT(DISTINCT rs.room_id) as active_rooms
+      FROM room_statuses rs
+      LEFT JOIN rooms r ON rs.room_id = r.id
+      WHERE rs.date LIKE ? ${roomFilter}
+    `).get(datePattern, ...roomArgs) as any
+
+    const totalRoomsResult = db.prepare(`
+      SELECT COUNT(*) as total_rooms FROM rooms WHERE status = 'active'
+    `).get() as { total_rooms: number }
+    const totalRooms = totalRoomsResult.total_rooms || 0
+
+    const daysInMonth = month ? dayjs(month + '-01').daysInMonth() : dayjs().daysInMonth()
+    const totalAvailableRoomDays = totalRooms * daysInMonth
+    const occupancyRate = totalAvailableRoomDays > 0
+      ? Math.round(((stats.occupied_days || 0) / totalAvailableRoomDays) * 10000) / 100
+      : 0
+
+    return {
+      occupied_days: stats.occupied_days || 0,
+      quota_used: stats.quota_used || 0,
+      paid_amount: stats.paid_amount || 0,
+      paid_days: stats.paid_days || 0,
+      blocked_days: stats.blocked_days || 0,
+      active_rooms: stats.active_rooms || 0,
+      total_rooms: totalRooms,
+      total_available_days: totalAvailableRoomDays,
+      occupancy_rate: occupancyRate
+    }
+  })
+
+  ipcMain.handle('db:getDashboardByRoom', (_e, params: any) => {
+    const db = getDb()
+    const { month, roomType, floor } = params || {}
+
+    let roomFilter = ''
+    const roomArgs: any[] = []
+
+    if (roomType) {
+      roomFilter += ' AND r.room_type = ?'
+      roomArgs.push(roomType)
+    }
+    if (floor) {
+      roomFilter += ' AND r.floor = ?'
+      roomArgs.push(floor)
+    }
+
+    const datePattern = month ? month + '%' : '%'
+
+    return db.prepare(`
+      SELECT
+        r.id as room_id,
+        r.room_no,
+        r.room_name,
+        r.room_type,
+        r.floor,
+        SUM(CASE WHEN rs.status = 'occupied' THEN 1 ELSE 0 END) as occupied_days,
+        SUM(CASE WHEN rs.status = 'occupied' AND rs.is_paid = 0 THEN rs.quota_used ELSE 0 END) as quota_used,
+        SUM(CASE WHEN rs.status = 'occupied' AND rs.is_paid = 1 THEN rs.amount ELSE 0 END) as paid_amount,
+        SUM(CASE WHEN rs.status = 'occupied' AND rs.is_paid = 1 THEN 1 ELSE 0 END) as paid_days,
+        SUM(CASE WHEN rs.status = 'blocked' THEN 1 ELSE 0 END) as blocked_days
+      FROM rooms r
+      LEFT JOIN room_statuses rs ON r.id = rs.room_id AND rs.date LIKE ?
+      WHERE r.status = 'active' ${roomFilter}
+      GROUP BY r.id, r.room_no, r.room_name, r.room_type, r.floor
+      ORDER BY occupied_days DESC, paid_amount DESC
+    `).all(datePattern, ...roomArgs)
+  })
+
+  ipcMain.handle('db:getRoomTypes', () => {
+    const db = getDb()
+    return db.prepare(`
+      SELECT DISTINCT room_type FROM rooms WHERE room_type IS NOT NULL AND room_type != '' ORDER BY room_type
+    `).all().map((r: any) => r.room_type)
+  })
+
+  ipcMain.handle('db:getFloors', () => {
+    const db = getDb()
+    return db.prepare(`
+      SELECT DISTINCT floor FROM rooms WHERE floor IS NOT NULL ORDER BY floor
+    `).all().map((r: any) => r.floor)
+  })
+
+  // ==================== 对账差异核对 ====================
+  ipcMain.handle('db:getReconciliationDiff', (_e, month: string) => {
+    const db = getDb()
+    const datePattern = month + '%'
+
+    const sideBySide = db.prepare(`
+      SELECT
+        rs.id as room_status_id,
+        rs.room_id,
+        r.room_no,
+        r.room_name,
+        rs.date,
+        rs.status as rs_status,
+        rs.is_paid as rs_is_paid,
+        rs.quota_used as rs_quota_used,
+        rs.amount as rs_amount,
+        cr.id as cr_id,
+        cr.type as cr_type,
+        cr.quota_used as cr_quota_used,
+        cr.amount as cr_amount
+      FROM room_statuses rs
+      LEFT JOIN rooms r ON rs.room_id = r.id
+      LEFT JOIN consumption_records cr ON rs.id = cr.room_status_id
+      WHERE rs.date LIKE ? AND rs.status != 'available'
+      ORDER BY rs.date ASC, rs.room_id ASC
+    `).all(datePattern) as any[]
+
+    const orphanRecords = db.prepare(`
+      SELECT
+        cr.id as cr_id,
+        cr.room_id,
+        r.room_no,
+        r.room_name,
+        cr.date,
+        cr.type as cr_type,
+        cr.quota_used as cr_quota_used,
+        cr.amount as cr_amount
+      FROM consumption_records cr
+      LEFT JOIN rooms r ON cr.room_id = r.id
+      WHERE cr.date LIKE ? AND cr.room_status_id IS NOT NULL
+        AND cr.room_status_id NOT IN (SELECT id FROM room_statuses)
+      ORDER BY cr.date ASC
+    `).all(datePattern) as any[]
+
+    const quotaResult = db.prepare(`
+      SELECT used_quota, paid_count, paid_amount, total_quota
+      FROM monthly_quotas WHERE month = ?
+    `).get(month) as any
+
+    const actualFromRoomStatus = db.prepare(`
+      SELECT
+        SUM(CASE WHEN is_paid = 0 AND status = 'occupied' THEN quota_used ELSE 0 END) as used_quota,
+        SUM(CASE WHEN is_paid = 1 AND status = 'occupied' THEN 1 ELSE 0 END) as paid_count,
+        SUM(CASE WHEN is_paid = 1 AND status = 'occupied' THEN amount ELSE 0 END) as paid_amount
+      FROM room_statuses
+      WHERE date LIKE ? AND status = 'occupied'
+    `).get(datePattern) as any
+
+    const actualFromConsumption = db.prepare(`
+      SELECT
+        SUM(CASE WHEN type = 'quota' AND room_id > 0 THEN ABS(quota_used) ELSE 0 END) as used_quota,
+        SUM(CASE WHEN type = 'paid' THEN 1 ELSE 0 END) as paid_count,
+        SUM(CASE WHEN type = 'paid' THEN amount ELSE 0 END) as paid_amount
+      FROM consumption_records
+      WHERE date LIKE ? AND room_id > 0
+    `).get(datePattern) as any
+
+    const diffs: any[] = []
+
+    for (const row of sideBySide) {
+      let issues: string[] = []
+
+      if (row.rs_status === 'occupied' && row.rs_is_paid === 0 && row.rs_quota_used > 0) {
+        if (!row.cr_id || row.cr_type !== 'quota' || Math.abs(row.cr_quota_used || 0) !== row.rs_quota_used) {
+          issues.push('免费占用但流水缺失或不匹配')
+        }
+      }
+
+      if (row.rs_status === 'occupied' && row.rs_is_paid === 1) {
+        if (!row.cr_id || row.cr_type !== 'paid' || Math.abs(row.cr_amount || 0) !== row.rs_amount) {
+          issues.push('自费占用但流水缺失或金额不匹配')
+        }
+      }
+
+      if (row.rs_status === 'blocked') {
+        if (row.cr_id) {
+          issues.push('锁房状态但存在消费流水')
+        }
+      }
+
+      if (issues.length > 0) {
+        diffs.push({
+          type: 'mismatch',
+          room_id: row.room_id,
+          room_no: row.room_no,
+          room_name: row.room_name,
+          date: row.date,
+          issues,
+          room_status: {
+            status: row.rs_status,
+            is_paid: row.rs_is_paid,
+            quota_used: row.rs_quota_used,
+            amount: row.rs_amount
+          },
+          consumption: row.cr_id ? {
+            type: row.cr_type,
+            quota_used: row.cr_quota_used,
+            amount: row.cr_amount
+          } : null
+        })
+      }
+    }
+
+    for (const row of orphanRecords) {
+      diffs.push({
+        type: 'orphan',
+        room_id: row.room_id,
+        room_no: row.room_no,
+        room_name: row.room_name,
+        date: row.date,
+        issues: ['消费流水存在但对应房态已删除'],
+        room_status: null,
+        consumption: {
+          type: row.cr_type,
+          quota_used: row.cr_quota_used,
+          amount: row.cr_amount
+        }
+      })
+    }
+
+    const hasQuotaDiff = (quotaResult?.used_quota || 0) !== (actualFromRoomStatus?.used_quota || 0) ||
+                        (quotaResult?.paid_count || 0) !== (actualFromRoomStatus?.paid_count || 0) ||
+                        (quotaResult?.paid_amount || 0) !== (actualFromRoomStatus?.paid_amount || 0)
+
+    return {
+      diffs,
+      diff_count: diffs.length,
+      quota_summary: {
+        from_monthly_quotas: quotaResult || { used_quota: 0, paid_count: 0, paid_amount: 0, total_quota: 0 },
+        from_room_statuses: actualFromRoomStatus || { used_quota: 0, paid_count: 0, paid_amount: 0 },
+        from_consumption_records: actualFromConsumption || { used_quota: 0, paid_count: 0, paid_amount: 0 },
+        has_diff: hasQuotaDiff
+      }
+    }
+  })
+
+  ipcMain.handle('db:regenerateConsumptionRecords', (_e, month: string) => {
+    const db = getDb()
+    const tx = db.transaction((m: string) => {
+      const datePattern = m + '%'
+
+      const deleted = db.prepare(`
+        DELETE FROM consumption_records
+        WHERE date LIKE ? AND room_status_id IN (
+          SELECT id FROM room_statuses WHERE date LIKE ?
+        )
+      `).run(datePattern, datePattern)
+
+      const allOccupied = db.prepare(`
+        SELECT rs.*, r.room_no, r.room_name
+        FROM room_statuses rs
+        LEFT JOIN rooms r ON rs.room_id = r.id
+        WHERE rs.date LIKE ? AND rs.status = 'occupied'
+        ORDER BY rs.date ASC
+      `).all(datePattern) as any[]
+
+      let generated = 0
+      for (const rs of allOccupied) {
+        if (rs.is_paid === 1) {
+          addConsumptionRecordInternal(db, {
+            room_id: rs.room_id,
+            room_status_id: rs.id,
+            date: rs.date,
+            type: 'paid',
+            amount: rs.amount,
+            quota_used: 0,
+            description: `房态同步 - ${rs.room_no || ''} - 自费挂房`,
+            created_by: 'reconciliation'
+          })
+        } else {
+          addConsumptionRecordInternal(db, {
+            room_id: rs.room_id,
+            room_status_id: rs.id,
+            date: rs.date,
+            type: 'quota',
+            amount: 0,
+            quota_used: -(rs.quota_used || 1),
+            description: `房态同步 - ${rs.room_no || ''} - 免费额度占用`,
+            created_by: 'reconciliation'
+          })
+        }
+        generated++
+      }
+
+      const monthQuota = getOrCreateMonthlyQuotaInternal(db, m)
+      const actualFromRoomStatus = db.prepare(`
+        SELECT
+          SUM(CASE WHEN is_paid = 0 AND status = 'occupied' THEN quota_used ELSE 0 END) as used_quota,
+          SUM(CASE WHEN is_paid = 1 AND status = 'occupied' THEN 1 ELSE 0 END) as paid_count,
+          SUM(CASE WHEN is_paid = 1 AND status = 'occupied' THEN amount ELSE 0 END) as paid_amount
+        FROM room_statuses
+        WHERE date LIKE ? AND status = 'occupied'
+      `).get(datePattern) as any
+
+      db.prepare(`
+        UPDATE monthly_quotas
+        SET used_quota = ?, paid_count = ?, paid_amount = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE month = ?
+      `).run(
+        actualFromRoomStatus.used_quota || 0,
+        actualFromRoomStatus.paid_count || 0,
+        actualFromRoomStatus.paid_amount || 0,
+        m
+      )
+
+      return {
+        deleted: deleted.changes || 0,
+        generated,
+        month: m,
+        new_used_quota: actualFromRoomStatus.used_quota || 0,
+        new_paid_count: actualFromRoomStatus.paid_count || 0,
+        new_paid_amount: actualFromRoomStatus.paid_amount || 0
+      }
+    })
+    return tx(month)
+  })
+
   // ==================== 对账汇总 ====================
   ipcMain.handle('db:getConsumptionMonthlySummary', (_e, month: string) => {
     const db = getDb()
     return db.prepare(`
       SELECT
-        SUM(CASE WHEN type = 'quota' THEN ABS(quota_used) ELSE 0 END) as quota_used,
+        SUM(CASE WHEN type = 'quota' AND room_id > 0 THEN ABS(quota_used) ELSE 0 END) as quota_used,
         SUM(CASE WHEN type = 'paid' THEN 1 ELSE 0 END) as paid_count,
         SUM(CASE WHEN type = 'paid' THEN amount ELSE 0 END) as paid_amount,
         COUNT(*) as total_records
       FROM consumption_records
-      WHERE date LIKE ?
+      WHERE date LIKE ? AND room_id > 0
     `).get(month + '%')
   })
 
@@ -688,13 +1104,13 @@ export function registerDatabaseIpc() {
         cr.room_id,
         r.room_no,
         r.room_name,
-        SUM(CASE WHEN cr.type = 'quota' THEN ABS(cr.quota_used) ELSE 0 END) as quota_used,
+        SUM(CASE WHEN cr.type = 'quota' AND cr.room_id > 0 THEN ABS(cr.quota_used) ELSE 0 END) as quota_used,
         SUM(CASE WHEN cr.type = 'paid' THEN 1 ELSE 0 END) as paid_count,
         SUM(CASE WHEN cr.type = 'paid' THEN cr.amount ELSE 0 END) as paid_amount,
         COUNT(*) as total_days
       FROM consumption_records cr
       LEFT JOIN rooms r ON cr.room_id = r.id
-      WHERE cr.date LIKE ?
+      WHERE cr.date LIKE ? AND cr.room_id > 0
       GROUP BY cr.room_id, r.room_no, r.room_name
       ORDER BY paid_amount DESC, quota_used DESC
     `).all(month + '%')
@@ -707,7 +1123,7 @@ export function registerDatabaseIpc() {
       SELECT cr.*, r.room_no, r.room_name
       FROM consumption_records cr
       LEFT JOIN rooms r ON cr.room_id = r.id
-      WHERE cr.room_id = ? AND cr.date LIKE ?
+      WHERE cr.room_id = ? AND cr.date LIKE ? AND cr.room_id > 0
       ORDER BY cr.date ASC
     `).all(roomId, month + '%')
   })

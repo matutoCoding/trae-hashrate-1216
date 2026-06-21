@@ -4,8 +4,14 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/',
     component: () => import('@/layout/MainLayout.vue'),
-    redirect: '/schedule',
+    redirect: '/dashboard',
     children: [
+      {
+        path: 'dashboard',
+        name: 'Dashboard',
+        component: () => import('@/views/dashboard/DashboardView.vue'),
+        meta: { title: '经营看板', icon: 'DataLine' }
+      },
       {
         path: 'schedule',
         name: 'Schedule',
